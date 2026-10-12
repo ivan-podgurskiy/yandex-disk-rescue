@@ -1,0 +1,18 @@
+# secrets and personal data must never be committed
+token.txt
+*.token
+.token
+.env
+
+# generated data (lists of your files = personal data)
+*.csv
+scans/
+cloud_files.csv
+only_in_cloud.csv
+*.log
+
+# downloads
+*.part
+
+__pycache__/
+*.pyc
