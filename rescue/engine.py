@@ -31,6 +31,7 @@ class Engine:
         self._pause_reason = 'user'
         self._running = False
         self.connected = False
+        self._connecting = False
         self._previews = True
         self._throttle_until = 0
         self._transferred = 0
@@ -49,16 +50,25 @@ class Engine:
 
     def connect(self,client):
         with self._lock:
-            if self._active or self._scanning or self._running:
+            if self._active or self._scanning or self._running or self._connecting:
                 raise ValueError('pause_required')
+            self._connecting = True
+            self.connected = False
+        try:
             account = client.check_access()
             if not account:
                 raise ApiError('invalid_response')
-            previous = self.store.get_setting('account')
-            if previous and previous != account:
-                raise ValueError('different_account')
-            self.store.set_setting('account',account)
-            self.client,self.connected = client,True
+            with self._lock:
+                if self._stop.is_set():
+                    raise ValueError('closed')
+                previous = self.store.get_setting('account')
+                if previous and previous != account:
+                    raise ValueError('different_account')
+                self.store.set_setting('account',account)
+                self.client,self.connected = client,True
+        finally:
+            with self._lock:
+                self._connecting = False
 
     def set_destination(self,destination):
         with self._lock:
