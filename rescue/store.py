@@ -167,3 +167,19 @@ class Store:
             total = db.execute('SELECT count(*),coalesce(sum(size),0) FROM files').fetchone()
             verified = db.execute("SELECT coalesce(sum(f.size),0) FROM jobs j JOIN files f ON j.file_id=f.id WHERE j.kind='original' AND j.status IN ('verified_md5','verified_size')").fetchone()[0]
             return {'counts':counts,'catalog_files':total[0],'catalog_bytes':total[1], 'verified_bytes':verified}
+
+    def relocate_mapping(self, scope, file_id, kind):
+        """Persist a fresh conflict name before writing; never overwrite the old copy."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = db.execute('SELECT rel FROM mappings WHERE scope=? AND file_id=? AND kind=?', (scope,file_id,kind)).fetchone()[0]
+            stem,ext = os.path.splitext(current)
+            for i in range(1,1000):
+                rel = stem + '-recovered-' + str(i) + ext
+                try:
+                    db.execute('UPDATE mappings SET rel=?,key=? WHERE scope=? AND file_id=? AND kind=?',
+                               (rel,rel.casefold(),scope,file_id,kind))
+                    return rel
+                except sqlite3.IntegrityError:
+                    continue
+            raise ValueError('path_collision')
