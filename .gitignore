@@ -16,3 +16,7 @@ only_in_cloud.csv
 
 __pycache__/
 *.pyc
+
+# local recovery state
+*.sqlite*
+.superpowers/
