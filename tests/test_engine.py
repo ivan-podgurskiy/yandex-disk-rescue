@@ -123,3 +123,11 @@ class EngineTests(unittest.TestCase):
         self.volume.uuid='test-volume'
         self.engine.resume(confirm_destination=True)
         wait_for(lambda: self.store.summary()['counts']['original'].get('verified_md5')==2,timeout=.5)
+
+    def test_completed_queue_is_safe_to_disconnect(self):
+        self.engine.start(False)
+        wait_for(lambda:self.store.summary()['counts']['original'].get('verified_md5')==2)
+        status=self.engine.status()
+        self.assertFalse(status['running'])
+        self.assertTrue(status['safe_to_disconnect'])
+        self.assertEqual(status['pause_reason'],'complete')

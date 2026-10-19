@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:, "><title>Disk Rescue · Восстановление</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="#overview"><span class="brand-icon">↗</span><span>disk<span class="brand-light">rescue</span></span></a>
+  <div class="side-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
+  <nav aria-label="Разделы"><a class="nav-active" href="#overview"><span>◫</span> Восстановление</a><a href="#files"><span>▤</span> Каталог файлов</a><a href="#setup"><span>⚙</span> Подключение</a></nav>
+  <div class="side-note"><span class="green-dot"></span> Ваши файлы — у вас<p>Работает на компьютере.<br>Без сторонних серверов<br>и телеметрии.</p></div>
+  <div class="sidebar-footer">Локальная версия <span>0.1</span></div>
+</aside>
+<div class="workspace">
+<header class="topbar"><div>Рабочее пространство <span>/</span> <strong>Восстановление</strong></div><div class="local-label"><span class="green-dot"></span> Локальный сервис <span id="fixture-label" hidden>· Тестовые данные</span></div></header>
+<main id="overview">
+  <div class="page-heading"><div><div class="eyebrow">ЯНДЕКС.ДИСК → ВАШ НАКОПИТЕЛЬ</div><h1>Сохранить то, что важно.</h1><p>Оригиналы, доступные превью и понятный результат для каждого файла.</p></div><span id="run-badge" class="pill">Подготовка</span></div>
+  <div id="network-error" class="banner error" role="alert" hidden>Нет связи с локальным сервисом. Проверяем подключение…</div>
+  <div id="operation-message" class="banner" role="status" hidden></div>
+  <section id="setup" class="setup-grid" aria-label="Подготовка">
+    <article class="card setup-card"><div class="card-heading"><span class="step">01</span><h2>Яндекс.Диск</h2><span id="connection-state" class="small-state">Не подключён</span></div><form id="connect-form"><label for="token">OAuth-токен</label><div class="input-row"><input id="token" type="password" autocomplete="off" placeholder="Введите токен доступа" spellcheck="false"><button id="connect-button" class="button secondary" type="submit">Подключить</button></div></form><div class="card-bottom"><span>Токен остаётся на компьютере</span><button id="configured-token" class="text-button">Из окружения / файла</button></div></article>
+    <article class="card setup-card"><div class="card-heading"><span class="step">02</span><h2>Место сохранения</h2><span id="destination-state" class="small-state">Ожидает диск</span></div><form id="destination-form"><label for="destination">Папка на внешнем диске</label><div class="input-row"><input id="destination" placeholder="/Volumes/Имя диска/Rescue" spellcheck="false" required><button id="destination-button" class="button secondary" type="submit">Проверить</button></div></form><div class="card-bottom"><span id="free-space">Выберите существующую папку на диске</span><span class="muted">Резерв ≥ 1 ГиБ</span></div></article>
+  </section>
+  <section class="metrics" aria-label="Результаты восстановления">
+    <article class="card metric"><div class="metric-label">В каталоге <span>▤</span></div><strong id="catalog-bytes">0 Б</strong><div id="catalog-count" class="metric-caption">Каталог ещё не получен</div></article>
+    <article class="card metric"><div class="metric-label">Оригиналы сохранены <span class="teal">✓</span></div><strong id="verified-bytes" class="teal">0 Б</strong><div id="verified-count" class="metric-caption">0 проверенных файлов</div></article>
+    <article class="card metric"><div class="metric-label">Превью сохранены <span>▧</span></div><strong id="preview-count">0</strong><div class="metric-caption">Отдельные уменьшенные копии</div></article>
+    <article class="card metric"><div class="metric-label">Ожидают повтора <span>↻</span></div><strong id="deferred-count">0</strong><div class="metric-caption">Вернёмся к недоступным файлам</div></article>
+  </section>
+  <section class="card recovery-card" aria-labelledby="recovery-heading"><div class="section-heading"><div><div class="eyebrow">ПРОЦЕСС ВОССТАНОВЛЕНИЯ</div><h2 id="recovery-heading">Готовим безопасную копию</h2></div><div class="recovery-controls"><button id="scan-button" class="button secondary">Получить каталог</button><button id="start-button" class="button primary">Начать восстановление <span>↗</span></button><button id="pause-button" class="button secondary" hidden>Приостановить</button><button id="resume-button" class="button primary" hidden>Продолжить</button></div></div>
+    <div class="progress-heading"><span id="progress-text">Подключите Диск и выберите место сохранения</span><strong id="progress-percent">0%</strong></div><progress id="progress" max="100" value="0" aria-label="Доля проверенных оригиналов"></progress>
+    <div class="transfer-details"><div><span class="green-dot"></span><span id="activity-text">Ожидает запуска</span></div><span id="speed">—</span><span id="transferred">Передано за сеанс: 0 Б</span></div>
+    <div class="recovery-footer"><label class="checkbox-label"><input id="previews" type="checkbox" checked> Сохранять доступные превью фотографий</label><span id="disk-safety">Очередь сохранится после перезапуска</span></div>
+    <p class="microcopy">Превью не заменяют оригиналы. Закрытие вкладки не останавливает загрузку — оставьте Python-процесс запущенным и компьютер включённым.</p>
+  </section>
+  <section id="files" class="card files-card" aria-labelledby="files-heading"><div class="section-heading"><div><h2 id="files-heading">Каталог и результаты <span id="files-count" class="count-tag">0</span></h2><p id="snapshot-info">Сначала получим список того, что доступно в облаке.</p></div><button id="export-button" class="button secondary">↓ Экспорт CSV</button></div>
+    <div class="table-tools"><label class="search-label"><span>⌕</span><input id="search" type="search" placeholder="Найти файл или папку…" aria-label="Поиск файлов"></label><select id="state-filter" aria-label="Статус файла"><option value="">Все статусы</option><option value="verified_md5">Оригинал · MD5</option><option value="verified_size">Оригинал · размер</option><option value="deferred">Ожидает повтора</option><option value="preview_saved">Есть превью</option><option value="pending">В очереди</option></select><button id="selection-button" class="text-button" disabled>Восстановить выбранные (0)</button></div>
+    <div class="table-wrap"><table><thead><tr><th class="check-cell"><input id="select-page" type="checkbox" aria-label="Выбрать страницу"></th><th>Файл</th><th>Размер</th><th>Оригинал</th><th>Превью</th><th>Попытки</th></tr></thead><tbody id="file-rows"></tbody></table></div>
+    <div id="empty-state" class="empty-state"><span>▤</span><h3>Начнём со списка файлов</h3><p>Получение каталога не требует внешнего диска.<br>Данные в облаке останутся без изменений.</p></div>
+    <div class="table-footer"><span id="page-info">Нет файлов</span><div><button id="previous-page" class="button small secondary" disabled>← Назад</button><button id="next-page" class="button small secondary" disabled>Далее →</button></div></div>
+  </section>
+  <footer class="page-footer"><span>Только чтение облака. Ничего не удаляем.</span><span>Disk Rescue · Независимый проект · MIT</span></footer>
+</main></div>
+</body></html>

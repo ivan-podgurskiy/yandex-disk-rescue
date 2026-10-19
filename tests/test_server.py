@@ -111,3 +111,13 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request('GET','/api/status')[0],200)
         self.assertLess(time.monotonic()-started,.4)
         gate.set()
+
+    def test_ui_assets_and_empty_status_are_available(self):
+        for path in ['/','/app.js','/styles.css']:
+            self.assertEqual(self.request('GET',path,auth=False)[0],200)
+        _,body=self.request('GET','/api/status')
+        data=json.loads(body)
+        self.assertTrue(data['connected'])
+        self.assertIsNone(data['destination'])
+        self.assertTrue(data['safe_to_disconnect'])
+        self.assertEqual(data['verified_bytes'],0)

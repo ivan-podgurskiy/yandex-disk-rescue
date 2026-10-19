@@ -240,6 +240,10 @@ class Engine:
     def status(self):
         with self._lock:
             data=self.store.summary()
+            kinds = ('original','preview') if self._previews else ('original',)
+            unfinished = sum(n for kind in kinds for state,n in data['counts'][kind].items() if state not in ('verified_md5','verified_size','preview_saved','preview_absent'))
+            if self._running and not self._active and not unfinished and not self._scanning:
+                self._pause('complete')
             free=None
             volume_error=''
             if self.destination:
