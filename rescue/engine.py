@@ -32,7 +32,8 @@ class Engine:
         self._running = False
         self.connected = False
         self._connecting = False
-        self._previews = True
+        self._previews = self.store.get_setting('previews',True)
+        self._selection = self.store.get_setting('selection')
         self._throttle_until = 0
         self._transferred = 0
         self._samples = deque()
@@ -141,6 +142,9 @@ class Engine:
                 snapshot_id = snapshot['id'] if snapshot else -1
             self.store.enqueue(snapshot_id,previews,file_ids)
             self._previews = previews
+            self._selection = file_ids
+            self.store.set_setting('previews',previews)
+            self.store.set_setting('selection',file_ids)
             try:
                 self.destination.check()
             except DestinationError as e:
@@ -201,7 +205,7 @@ class Engine:
             with self._lock:
                 now = self.clock()
                 if self._running and self.connected and now>=self._throttle_until:
-                    job=self.store.claim_job(now,self._previews)
+                    job=self.store.claim_job(now,self._previews,self._selection)
                     if job:
                         self._active[job.id]=job
             if not job:
@@ -240,8 +244,7 @@ class Engine:
     def status(self):
         with self._lock:
             data=self.store.summary()
-            kinds = ('original','preview') if self._previews else ('original',)
-            unfinished = sum(n for kind in kinds for state,n in data['counts'][kind].items() if state not in ('verified_md5','verified_size','preview_saved','preview_absent'))
+            unfinished = self.store.unfinished(self._previews,self._selection)
             if self._running and not self._active and not unfinished and not self._scanning:
                 self._pause('complete')
             free=None
@@ -256,7 +259,7 @@ class Engine:
             now=self.clock()
             samples=[(t,n) for t,n in self._samples if t>=now-10]
             data.update(connected=self.connected,scanning=self._scanning,scan_error=self._scan_error,
-                        snapshot=self.store.snapshot(),running=self._running,pause_reason=self._pause_reason,
+                        snapshot=self.store.snapshot(),running=self._running,previews=self._previews,selection=self._selection,pause_reason=self._pause_reason,
                         active_jobs=len(self._active),safe_to_disconnect=not self._running and not self._active,
                         transferred_bytes=self._transferred,speed_bps=sum(n for _,n in samples)/10,
                         retry_in=max(0,self._throttle_until-now),free_bytes=free,

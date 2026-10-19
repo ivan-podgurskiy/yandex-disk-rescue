@@ -183,7 +183,7 @@ def create_server(engine,data_dir,port=8765):
                     # as a CSV; file contents never pass through the HTTP server.
                     out=io.StringIO(newline='')
                     writer=csv.writer(out)
-                    fields=['path','size','md5','original_status','preview_status','verification','error_code','attempts']
+                    fields=['path','size','md5','original_status','preview_status','verification','error_code','attempts','preview_error','preview_attempts','local_original','local_preview']
                     writer.writerow(fields)
                     offset=0
                     while True:

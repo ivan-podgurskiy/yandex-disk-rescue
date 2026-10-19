@@ -1,5 +1,7 @@
 """Destination capabilities: all writes are relative to held no-follow descriptors."""
+import ctypes
 import errno
+import sys
 import hashlib
 import os
 import plistlib
@@ -195,6 +197,22 @@ class Destination:
             raise
 
 
+
+def publish_noreplace(fd, source, target):
+    if sys.platform == 'darwin':
+        # macOS RENAME_EXCL is atomic and works on volumes without hard links (exFAT).
+        libc = ctypes.CDLL(None,use_errno=True)
+        rename = libc.renameatx_np
+        rename.argtypes = [ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        if rename(fd,os.fsencode(source),fd,os.fsencode(target),4):
+            code = ctypes.get_errno()
+            raise OSError(code,os.strerror(code))
+    else:
+        os.link(source,target,src_dir_fd=fd,dst_dir_fd=fd,follow_symlinks=False)
+        os.unlink(source,dir_fd=fd)
+
+
 class Attempt:
     def __init__(self,destination,fd,name,job_id):
         self.destination,self.fd,self.name,self.job_id = destination,fd,name,job_id
@@ -213,10 +231,12 @@ class Attempt:
         self.writer.flush()
         os.fsync(self.writer.fileno())
         self.writer.close()
-        # Hard-link publish is atomic and refuses to overwrite another file.
-        os.link(self.temp,self.name,src_dir_fd=self.fd,dst_dir_fd=self.fd,follow_symlinks=False)
-        os.unlink(self.temp,dir_fd=self.fd)
-        os.fsync(self.fd)
+        publish_noreplace(self.fd,self.temp,self.name)
+        try:
+            os.fsync(self.fd)
+        except OSError as error:
+            if error.errno not in (errno.EINVAL,errno.ENOTSUP):
+                raise
         os.close(self.fd)
         self.fd = None
 

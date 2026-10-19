@@ -56,6 +56,7 @@ function render(){
   $('resume-button').hidden=!resumable;
   $('resume-button').disabled=busy||!s.connected;
   $('previews').disabled=s.running||writing||resumable;
+  if(s.running||resumable)$('previews').checked=s.previews;
   $('export-button').disabled=!s.catalog_files;
   $('selection-button').disabled=busy||s.running||writing||!s.connected||!s.destination||!!s.volume_error||!selected.size;
   text('selection-button','Восстановить выбранные ('+selected.size+')');
@@ -73,9 +74,11 @@ function renderRows(){
     const tr=document.createElement('tr'),check=document.createElement('td');check.className='check-cell';
     const input=document.createElement('input');input.type='checkbox';input.checked=selected.has(row.id);input.setAttribute('aria-label','Выбрать '+row.path);
     input.addEventListener('change',()=>{if(input.checked)selected.add(row.id);else selected.delete(row.id);render();});check.append(input);tr.append(check);
-    const name=document.createElement('td');name.className='file-name';name.title=row.path+(row.error_code?' · '+explain(row.error_code):'');
+    const name=document.createElement('td');name.className='file-name';name.title=row.path+(row.error_code?' · '+explain(row.error_code):'')+(row.preview_error?' · Превью: '+explain(row.preview_error):'');
     const icon=document.createElement('span');icon.className='file-icon';icon.textContent='▧';name.append(icon,document.createTextNode(row.path.split('/').pop()||row.path));
-    const path=document.createElement('span');path.className='file-path';path.textContent=row.path;name.append(path);tr.append(name);
+    const path=document.createElement('span');path.className='file-path';path.textContent=row.path;name.append(path);
+    if(row.local_original||row.local_preview){const local=document.createElement('span');local.className='file-path';local.textContent=([row.original_status,row.preview_status].some(s=>['verified_md5','verified_size','preview_saved'].includes(s))?'Копия: ':'Назначение: ')+(row.local_original||row.local_preview);local.title=local.textContent;name.append(local);}
+    tr.append(name);
     const size=document.createElement('td');size.textContent=bytes(row.size);tr.append(size);
     for(const state of [row.original_status,row.preview_status]){const td=document.createElement('td');td.append(badge(state));tr.append(td);}
     const attempts=document.createElement('td');attempts.textContent=row.attempts||'—';tr.append(attempts);body.append(tr);

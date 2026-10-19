@@ -89,11 +89,17 @@ class Store:
                 for kind in kinds:
                     db.execute('INSERT OR IGNORE INTO jobs(file_id,kind) VALUES(?,?)', (row['id'], kind))
 
-    def claim_job(self, now, previews=True):
+    def claim_job(self, now, previews=True, file_ids=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT j.id FROM jobs j WHERE status IN ('pending','deferred') AND retry_at<=? "
-                             "AND (? OR kind='original') ORDER BY attempts,id LIMIT 1", (now, previews)).fetchone()
+            sql = "SELECT j.id FROM jobs j WHERE status IN ('pending','deferred') AND retry_at<=? AND (? OR kind='original')"
+            args = [now,previews]
+            if file_ids is not None:
+                if not file_ids:
+                    return None
+                sql += ' AND file_id IN (' + ','.join('?' for _ in file_ids) + ')'
+                args.extend(file_ids)
+            row = db.execute(sql+' ORDER BY attempts,id LIMIT 1',args).fetchone()
             if not row:
                 return None
             db.execute("UPDATE jobs SET status='active', attempts=attempts+1 WHERE id=?", (row[0],))
@@ -142,10 +148,15 @@ class Store:
 
     def files(self, snapshot_id=None, offset=0, limit=200, query='', state=''):
         sql = '''SELECT f.*, o.status AS original_status, p.status AS preview_status,
-                 o.error_code, o.attempts, o.verification FROM files f
+                 o.error_code, o.attempts, o.verification, p.error_code AS preview_error, p.attempts AS preview_attempts,
+                 mo.rel AS local_original, mp.rel AS local_preview FROM files f
                  LEFT JOIN jobs o ON o.file_id=f.id AND o.kind='original'
-                 LEFT JOIN jobs p ON p.file_id=f.id AND p.kind='preview' WHERE 1=1'''
-        args = []
+                 LEFT JOIN jobs p ON p.file_id=f.id AND p.kind='preview'
+                 LEFT JOIN mappings mo ON mo.file_id=f.id AND mo.kind='original' AND mo.scope=?
+                 LEFT JOIN mappings mp ON mp.file_id=f.id AND mp.kind='preview' AND mp.scope=? WHERE 1=1'''
+        destination = self.get_setting('destination')
+        scope = destination['identity']['uuid'] + ':' + destination['root'] if destination else ''
+        args = [scope,scope]
         if snapshot_id is not None:
             sql += ' AND f.id IN (SELECT file_id FROM members WHERE snapshot_id=?)'
             args.append(snapshot_id)
@@ -158,7 +169,13 @@ class Store:
         sql += ' ORDER BY f.id LIMIT ? OFFSET ?'
         args.extend([limit,offset])
         with self.connect() as db:
-            return [dict(r) for r in db.execute(sql,args)]
+            rows = [dict(r) for r in db.execute(sql,args)]
+        if destination:
+            for row in rows:
+                for field in ('local_original','local_preview'):
+                    if row[field]:
+                        row[field] = os.path.join(destination['root'],row[field])
+        return rows
 
     def summary(self):
         with self.connect() as db:
@@ -184,3 +201,14 @@ class Store:
                 except sqlite3.IntegrityError:
                     continue
             raise ValueError('path_collision')
+
+    def unfinished(self, previews=True, file_ids=None):
+        sql = "SELECT count(*) FROM jobs WHERE status NOT IN ('verified_md5','verified_size','preview_saved','preview_absent') AND (? OR kind='original')"
+        args = [previews]
+        if file_ids is not None:
+            if not file_ids:
+                return 0
+            sql += ' AND file_id IN (' + ','.join('?' for _ in file_ids) + ')'
+            args.extend(file_ids)
+        with self.connect() as db:
+            return db.execute(sql,args).fetchone()[0]

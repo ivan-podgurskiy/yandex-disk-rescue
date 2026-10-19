@@ -79,3 +79,14 @@ class DestinationTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             attempt.commit()
         self.assertEqual(target.read_bytes(), b'old')
+
+    def test_publish_works_without_hardlink_support(self):
+        import errno
+        from unittest.mock import patch
+        rel=self.dest.map_path(self.job('/portable'),self.store)
+        attempt=self.dest.open_attempt(self.job('/portable'),rel)
+        self.addCleanup(attempt.discard)
+        attempt.writer.write(b'abc')
+        with patch('os.link',side_effect=OSError(errno.ENOTSUP,'hard links unavailable')):
+            attempt.commit()
+        self.assertEqual(Path(self.root,rel).read_bytes(),b'abc')
