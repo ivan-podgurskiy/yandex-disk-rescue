@@ -54,6 +54,7 @@ class YandexClient:
         if not token or any(c in token for c in '\r\n'):
             raise ApiError('auth')
         self._token = token.strip()
+        self.preview_size = 'XXXL'
         self.timeout = timeout
         self._opener = opener or urllib.request.build_opener(SafeRedirect())
 
@@ -122,7 +123,7 @@ class YandexClient:
         return value
 
     def preview_url(self, file):
-        value = self._json('/resources', {'path':'disk:' + file.path,'preview_size':'XXXL','preview_crop':'false','fields':'preview'}).get('preview')
+        value = self._json('/resources', {'path':'disk:' + file.path,'preview_size':self.preview_size,'preview_crop':'false','fields':'preview'}).get('preview')
         if value is not None and (not isinstance(value,str) or not allowed(value)):
             raise ApiError('unsafe_url')
         return value

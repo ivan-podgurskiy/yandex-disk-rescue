@@ -76,7 +76,8 @@ class Store:
     def enqueue(self, snapshot_id, previews, file_ids=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('SELECT f.* FROM files f JOIN members m ON f.id=m.file_id WHERE snapshot_id=?', (snapshot_id,)).fetchall()
+            rows = (db.execute('SELECT * FROM files').fetchall() if snapshot_id is None else
+                    db.execute('SELECT f.* FROM files f JOIN members m ON f.id=m.file_id WHERE snapshot_id=?', (snapshot_id,)).fetchall())
             if file_ids is not None:
                 if not set(file_ids).issubset({r['id'] for r in rows}):
                     raise ValueError('invalid_selection')

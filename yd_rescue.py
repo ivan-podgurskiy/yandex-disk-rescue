@@ -134,6 +134,8 @@ def run_passes(rows, work_fn, workers, pause, stop_after, pending_out, stall=120
     seconds, the pass is abandoned (the stuck daemon threads are left behind)
     and the unfinished rows go to the next pass.
     """
+    # Legacy generic helper retained for callers; actual transfers use bounded,
+    # joined workers in rescue.cli/engine and never abandon a live writer.
     pending = rows
     empty = 0
     n = 0
@@ -342,85 +344,13 @@ def read_rows(path):
 
 
 def cmd_previews(args):
-    token = load_token()
-    rows = [r for r in read_rows(args.list) if r["path"].lower().endswith(IMAGE_EXT)]
-    auth = {"Authorization": "OAuth " + token}
-    log("previews: %d images, size=%s -> %s" % (len(rows), args.size, args.dest))
-
-    def work(row):
-        dst = os.path.join(args.dest, safe_rel(row["path"]))
-        if os.path.exists(lp(dst)) and os.path.getsize(lp(dst)) > 0:
-            return True
-        try:
-            q = ("/resources?path=%s&preview_size=%s&preview_crop=false&fields=preview"
-                 % (urllib.parse.quote("disk:" + row["path"]), args.size))
-            url = api_get(q, token, args.timeout).get("preview")
-            if not url:
-                return True            # no preview exists for this file; do not retry
-            if not is_yandex_host(url):
-                return False           # never send the token to a foreign host
-            # the preview host answers 403 without the token header
-            req = urllib.request.Request(url, headers=auth)
-            with _opener.open(req, timeout=args.timeout) as r:
-                data = r.read()
-            if not data:
-                return False
-            atomic_write(dst, data)
-            return True
-        except Exception:
-            return False
-
-    run_passes(rows, work, args.workers, args.pause, args.stop_after,
-               os.path.join(args.dest, "_pending_previews.csv"))
+    from rescue.cli import run_transfer_command
+    run_transfer_command(args, load_token(), preview=True)
 
 
 def cmd_download(args):
-    token = load_token()
-    rows = read_rows(args.list)
-    if args.only_ext:
-        exts = tuple(e.lower() for e in args.only_ext)
-        rows = [r for r in rows if r["path"].lower().endswith(exts)]
-    log("download: %d files, %s -> %s"
-        % (len(rows), fmt_gb(sum(int(r["size"]) for r in rows)), args.dest))
-
-    def work(row):
-        size = int(row["size"])
-        dst = os.path.join(args.dest, safe_rel(row["path"]))
-        if os.path.exists(lp(dst)) and os.path.getsize(lp(dst)) == size:
-            return True
-        os.makedirs(lp(os.path.dirname(dst)), exist_ok=True)
-        part = dst + ".part"
-        try:
-            href = api_get("/resources/download?path=%s"
-                           % urllib.parse.quote("disk:" + row["path"]), token, args.timeout)["href"]
-            if not is_yandex_host(href):
-                return False
-            h = hashlib.md5()
-            got = 0
-            # signed link: no auth header is sent to the download host
-            with _opener.open(urllib.request.Request(href), timeout=args.timeout) as r, \
-                    open(lp(part), "wb") as out:
-                while True:
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    h.update(chunk)
-                    got += len(chunk)
-            if got != size or (row.get("md5") and h.hexdigest() != row["md5"]):
-                raise IOError("size/md5 mismatch")
-            os.replace(lp(part), lp(dst))
-            return True
-        except Exception:
-            try:
-                if os.path.exists(lp(part)):
-                    os.remove(lp(part))
-            except OSError:
-                pass
-            return False
-
-    run_passes(rows, work, args.workers, args.pause, args.stop_after,
-               os.path.join(args.dest, "_pending_download.csv"))
+    from rescue.cli import run_transfer_command
+    run_transfer_command(args, load_token(), preview=False)
 
 
 # ---------------------------------------------------------------- watch
