@@ -57,10 +57,38 @@ class CliTransferTests(unittest.TestCase):
                 path.write_bytes(b'old')
                 dest.close()
             args=argparse.Namespace(list=listing,dest=out,workers=2,pause=0,stop_after=1,timeout=1,only_ext=None,size='XXXL')
-            with patch('rescue.cli.YandexClient',return_value=client),patch('rescue.cli.Destination.bind',side_effect=fixture_bind):
+            with patch('rescue.cli.YandexClient',return_value=client),patch('rescue.cli.Destination.bind',side_effect=fixture_bind),patch('rescue.cli.cli_state_path',return_value=os.path.join(root,'internal.sqlite')):
                 run_transfer_command(args,'fixture',False)
             saved=[p.read_bytes() for p in Path(out,'originals').rglob('*') if p.is_file()]
             for b in data.values():
                 self.assertIn(b,saved)
             if preexisting:
                 self.assertIn(b'old',saved)
+
+    def test_disk_loss_does_not_write_report_into_replacement(self):
+        import argparse
+        import csv
+        import io
+        from rescue.cli import run_transfer_command
+        with tempfile.TemporaryDirectory() as root:
+            out=os.path.join(root,'external')
+            os.mkdir(out)
+            listing=os.path.join(root,'list.csv')
+            with open(listing,'w',newline='') as f:
+                w=csv.writer(f)
+                w.writerow(['path','size','md5','media_type'])
+                w.writerow(['/a',3,hashlib.md5(b'abc').hexdigest(),''])
+            client=FakeClient({'/a':b'abc'})
+            def stream(*args,**kwargs):
+                os.rename(out,out+'-detached')
+                os.mkdir(out)
+                return io.BytesIO(b'abc')
+            client.open_stream=stream
+            bind=Destination.bind
+            volume=Volume()
+            def fixture_bind(path):
+                return bind(path,identify=volume.identify,capacity=volume.capacity)
+            args=argparse.Namespace(list=listing,dest=out,workers=1,pause=0,stop_after=1,timeout=1,only_ext=None)
+            with patch('rescue.cli.YandexClient',return_value=client),patch('rescue.cli.Destination.bind',side_effect=fixture_bind),patch('rescue.cli.cli_state_path',return_value=os.path.join(root,'internal.sqlite'),create=True):
+                run_transfer_command(args,'fixture',False)
+            self.assertEqual(list(Path(out).rglob('*')),[])

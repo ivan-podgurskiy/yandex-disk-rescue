@@ -131,3 +131,12 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(status['running'])
         self.assertTrue(status['safe_to_disconnect'])
         self.assertEqual(status['pause_reason'],'complete')
+
+    def test_same_volume_remount_with_new_device_is_accepted(self):
+        self.engine.close()
+        previous=self.store.get_setting('destination')
+        previous['identity']['device']=-123
+        self.store.set_setting('destination',previous)
+        reopened=Engine(self.store,self.client,self.dest,workers=1)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.status()['destination'],self.dest.root)

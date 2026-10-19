@@ -78,12 +78,13 @@ class Engine:
             destination.check()
             previous = self.store.get_setting('destination')
             chosen = {'root':destination.root,'identity':destination.identity}
-            if previous and previous != chosen:
+            if previous and (previous['root'] != chosen['root'] or previous['identity']['uuid'] != chosen['identity']['uuid']):
                 # A new target must not inherit verification results from another disk.
                 raise ValueError('different_destination')
-            destination.acquire()
             if self.destination and self.destination is not destination:
                 self.destination.close()
+                self.destination = None
+            destination.acquire()
             self.destination = destination
             self.store.set_setting('destination',chosen)
 
@@ -105,14 +106,28 @@ class Engine:
     def _scan(self,sid):
         try:
             offset = self.store.snapshot(sid)['cursor']
+            progress = self.store.get_setting('scan_recheck')
+            if not progress or progress['snapshot_id'] != sid:
+                progress = {'snapshot_id':sid,'start_count':self.store.snapshot_count(sid),'passes':0}
+                self.store.set_setting('scan_recheck',progress)
             while not self._catalog_cancel.is_set() and not self._stop.is_set():
                 if self.clock()<self._throttle_until:
                     self._catalog_cancel.wait(min(1,self._throttle_until-self.clock()))
                     continue
                 files = self.client.list_page(offset)
                 if not files:
-                    self.store.finish_snapshot(sid)
-                    break
+                    observed = self.store.snapshot_count(sid)
+                    if progress['passes'] >= 1 and observed == progress['start_count']:
+                        self.store.finish_snapshot(sid)
+                        break
+                    progress = {'snapshot_id':sid,'start_count':observed,'passes':progress['passes']+1}
+                    self.store.rewind_snapshot(sid)
+                    self.store.set_setting('scan_recheck',progress)
+                    offset = 0
+                    if progress['passes'] >= 3:
+                        self._scan_error = 'catalog_changing'
+                        break
+                    continue
                 offset += len(files)
                 self.store.record_page(sid,files,offset)
         except ApiError as e:
@@ -184,7 +199,15 @@ class Engine:
                 raise ValueError('destination_required')
             if self._pause_reason in DISK_ERRORS and not confirm_destination:
                 raise ValueError('confirmation_required')
-            self.destination.check()
+            if confirm_destination:
+                refreshed = self.destination.rebind()
+                try:
+                    self.set_destination(refreshed)
+                except BaseException:
+                    refreshed.close()
+                    raise
+            else:
+                self.destination.check()
             self._pause_reason = ''
             self._running = True
             self._cancel.clear()

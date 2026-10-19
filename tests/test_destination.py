@@ -90,3 +90,28 @@ class DestinationTests(unittest.TestCase):
         with patch('os.link',side_effect=OSError(errno.ENOTSUP,'hard links unavailable')):
             attempt.commit()
         self.assertEqual(Path(self.root,rel).read_bytes(),b'abc')
+
+    def test_native_probe_resolves_directory_to_backing_device(self):
+        import plistlib
+        import subprocess
+        from unittest.mock import patch
+        from rescue.destination import VolumeProbe
+        def run(argv,**kwargs):
+            if argv[:2]==['/bin/df','-P']:
+                return subprocess.CompletedProcess(argv,0,b'Filesystem 512-blocks Used Available Capacity Mounted on\n/dev/disk99s1 100 20 80 20% /Volumes/Test\n',b'')
+            if argv==['/usr/sbin/diskutil','info','-plist','/dev/disk99s1']:
+                return subprocess.CompletedProcess(argv,0,plistlib.dumps({'VolumeUUID':'native-fixture','MountPoint':'/Volumes/Test'}),b'')
+            raise subprocess.CalledProcessError(1,argv)
+        with patch('rescue.destination.subprocess.run',side_effect=run):
+            self.assertEqual(VolumeProbe()(self.root)['uuid'],'native-fixture')
+
+    def test_parent_directory_swapped_after_open_is_rejected(self):
+        rel=self.dest.map_path(self.job('/folder/a'),self.store)
+        attempt=self.dest.open_attempt(self.job('/folder/a'),rel)
+        self.addCleanup(attempt.discard)
+        outside=os.path.join(self.tmp.name,'moved')
+        os.rename(os.path.join(self.root,'originals'),outside)
+        os.symlink(outside,os.path.join(self.root,'originals'))
+        with self.assertRaises(DestinationError):
+            attempt.check()
+        self.assertFalse(Path(outside,rel.split('/',1)[1]).exists())

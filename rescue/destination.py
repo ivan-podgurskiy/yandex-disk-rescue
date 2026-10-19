@@ -5,6 +5,7 @@ import sys
 import hashlib
 import os
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -36,7 +37,11 @@ class VolumeProbe:
         if self.cached and key == self.key and time.monotonic() - self.checked < 5:
             return self.cached
         try:
-            raw = subprocess.run(['/usr/sbin/diskutil','info','-plist',root], check=True,
+            usage = subprocess.run(['/bin/df','-P',root], check=True,capture_output=True,timeout=5).stdout.decode('utf-8')
+            devices = [line.split()[0] for line in usage.splitlines() if line.startswith('/dev/disk')]
+            if len(devices) != 1 or not re.fullmatch(r'/dev/disk[0-9]+(?:s[0-9]+)*',devices[0]):
+                raise ValueError('unidentified device')
+            raw = subprocess.run(['/usr/sbin/diskutil','info','-plist',devices[0]], check=True,
                                  capture_output=True, timeout=5).stdout
             data = plistlib.loads(raw)
             if not data.get('VolumeUUID') or not data.get('MountPoint'):
@@ -44,7 +49,7 @@ class VolumeProbe:
             self.cached = {'uuid':data['VolumeUUID'],'mount':data['MountPoint'],'device':st.st_dev}
             self.key, self.checked = key, time.monotonic()
             return self.cached
-        except (OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException):
+        except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, plistlib.InvalidFileException):
             raise DestinationError('missing_volume') from None
 
 
@@ -64,6 +69,9 @@ class Destination:
         self._reservations = {}
         self._lock = threading.RLock()
         self._ownership = None
+
+    def rebind(self):
+        return type(self).bind(self.root,identify=self._identify,capacity=self._capacity)
 
     def close(self):
         if self._ownership is not None:
@@ -122,6 +130,7 @@ class Destination:
         self._ownership = fd
 
     def map_path(self, job, store):
+        self.check()
         existing = store.mapping(self.scope,job.file_id,job.kind)
         if existing:
             return existing
@@ -191,11 +200,32 @@ class Destination:
     def open_attempt(self, job, rel):
         fd,name = self._parent(rel,create=True)
         try:
-            return Attempt(self,fd,name,job.id)
+            return Attempt(self,fd,name,job.id,rel)
         except BaseException:
             os.close(fd)
             raise
 
+
+    def write_report(self,name,payload):
+        if name not in ('_pending_download.csv','_pending_previews.csv'):
+            raise DestinationError('unsafe_path')
+        self.reserve(-1,len(payload))
+        attempt = None
+        try:
+            fd,leaf = self._parent(name)
+            attempt = Attempt(self,fd,leaf,-1,name)
+            attempt.check()
+            attempt.writer.write(payload)
+            attempt.writer.flush()
+            os.fsync(attempt.writer.fileno())
+            self.consume(-1,len(payload))
+            attempt.check()
+            attempt.writer.close()
+            os.replace(attempt.temp,leaf,src_dir_fd=fd,dst_dir_fd=fd)
+        finally:
+            if attempt:
+                attempt.discard()
+            self.release(-1)
 
 
 def publish_noreplace(fd, source, target):
@@ -214,7 +244,8 @@ def publish_noreplace(fd, source, target):
 
 
 class Attempt:
-    def __init__(self,destination,fd,name,job_id):
+    def __init__(self,destination,fd,name,job_id,rel):
+        self.rel = rel
         self.destination,self.fd,self.name,self.job_id = destination,fd,name,job_id
         self.temp = '.yd-' + uuid.uuid4().hex + '.part'
         out = os.open(self.temp,os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,0o600,dir_fd=fd)
@@ -222,9 +253,18 @@ class Attempt:
 
     def check(self):
         self.destination.check_space()
-        # Verify this descriptor still belongs to the current root hierarchy.
-        # Even if a directory is swapped, open descriptors cannot redirect writes.
-        self.destination.check()
+        # Reopen the current no-follow hierarchy and compare the held parent.
+        # A moved/replaced child must not receive any more data or publication.
+        try:
+            current, _ = self.destination._parent(self.rel)
+        except (FileNotFoundError,DestinationError):
+            raise DestinationError('unsafe_path') from None
+        try:
+            before,now = os.fstat(self.fd),os.fstat(current)
+            if (before.st_dev,before.st_ino) != (now.st_dev,now.st_ino):
+                raise DestinationError('unsafe_path')
+        finally:
+            os.close(current)
 
     def commit(self):
         self.check()

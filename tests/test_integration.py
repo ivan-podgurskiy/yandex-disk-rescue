@@ -122,3 +122,20 @@ class RecoveryIntegrationTests(unittest.TestCase):
         wait_for(lambda:self.store.summary()['counts']['original'].get('verified_md5')==4)
         result=self.request('/api/files')['files']
         self.assertTrue(all(r.get('local_original') for r in result))
+
+    def test_scan_rechecks_catalog_to_recover_offset_shift_omission(self):
+        self.transport.data={'/a':b'a','/b':b'b','/c':b'c','/d':b'd'}
+        original_open=self.transport.open
+        shifted=[False]
+        def changing(req,timeout=None):
+            from urllib.parse import urlsplit,parse_qs
+            u=urlsplit(req.full_url)
+            if u.path.endswith('/resources/files') and parse_qs(u.query).get('offset')==['2'] and not shifted[0]:
+                shifted[0]=True
+                del self.transport.data['/a']
+            return original_open(req,timeout)
+        self.transport.open=changing
+        self.engine.scan_catalog()
+        wait_for(lambda:not self.engine.status()['scanning'])
+        observed={r['path'] for r in self.store.files(snapshot_id=self.store.snapshot()['id'])}
+        self.assertIn('/c',observed)

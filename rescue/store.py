@@ -212,3 +212,11 @@ class Store:
             args.extend(file_ids)
         with self.connect() as db:
             return db.execute(sql,args).fetchone()[0]
+
+    def snapshot_count(self, snapshot_id):
+        with self.connect() as db:
+            return db.execute('SELECT count(*) FROM members WHERE snapshot_id=?',(snapshot_id,)).fetchone()[0]
+
+    def rewind_snapshot(self, snapshot_id):
+        with self.connect() as db:
+            db.execute('UPDATE snapshots SET cursor=0 WHERE id=?',(snapshot_id,))

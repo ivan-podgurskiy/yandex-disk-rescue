@@ -1,17 +1,28 @@
 """Existing CSV commands backed by the same guarded transfer primitives."""
 import csv
+import hashlib
+import io
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 from .api import YandexClient
-from .destination import Destination
+from .destination import Destination, DestinationError
 from .locking import ProcessLock
-from .models import CloudFile, Job, FINISHED, IMAGE_EXT
+from .models import CloudFile, Job, TransferResult, FINISHED, IMAGE_EXT
 from .store import Store
 from .transfer import transfer
+
+
+def cli_state_path(destination):
+    root=Path.home()/'Library/Application Support/YandexDiskRescue/cli'
+    root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    os.chmod(root,0o700)
+    key=hashlib.sha256(destination.scope.encode()).hexdigest()
+    return str(root/(key+'.sqlite'))
 
 
 def run_transfer_command(args,token,preview=False):
@@ -32,7 +43,7 @@ def run_transfer_command(args,token,preview=False):
     owner=None
     try:
         destination.acquire()
-        path=os.path.join(absolute,'.yd-rescue-state.sqlite')
+        path=cli_state_path(destination)
         owner=ProcessLock(path+'.lock')
         store=Store(path)
         client=YandexClient(token,timeout=args.timeout)
@@ -53,20 +64,34 @@ def run_transfer_command(args,token,preview=False):
                     row,file=pair
                     fid=ids[file.path]
                     job=Job(fid,fid,file,'preview' if preview else 'original','',1)
-                    rel=destination.map_path(job,store)
+                    try:
+                        rel=destination.map_path(job,store)
+                    except DestinationError as error:
+                        return TransferResult('deferred',error_code=error.code)
                     return transfer(replace(job,local_rel=rel),client,destination,stop,lambda n:None,store=store)
                 results=list(pool.map(work,pending))
                 left=[pair for pair,result in zip(pending,results) if result.status not in FINISHED]
                 fatal=any(r.error_code in ('auth','no_space','wrong_volume','missing_volume','disk_io','unsafe_path') for r in results)
                 empty=empty+1 if len(left)==len(pending) else 0
                 pending=left
-                target=os.path.join(absolute,'_pending_previews.csv' if preview else '_pending_download.csv')
-                temp=target+'.part'
-                with open(temp,'w',newline='',encoding='utf-8-sig') as out:
-                    writer=csv.DictWriter(out,fieldnames=['path','size','md5','media_type'],extrasaction='ignore')
-                    writer.writeheader()
-                    writer.writerows(r for r,_ in pending)
-                os.replace(temp,target)
+                name='_pending_previews.csv' if preview else '_pending_download.csv'
+                report=io.StringIO(newline='')
+                writer=csv.DictWriter(report,fieldnames=['path','size','md5','media_type'],extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(r for r,_ in pending)
+                payload=report.getvalue().encode('utf-8-sig')
+                internal=path+'.'+name
+                temp=internal+'.part'
+                with open(temp,'wb') as out:
+                    out.write(payload)
+                os.replace(temp,internal)
+                if not fatal:
+                    try:
+                        destination.write_report(name,payload)
+                    except (DestinationError,OSError):
+                        fatal=True
+                if fatal:
+                    print('Destination paused; pending list retained internally: '+internal,flush=True)
                 print('%d remaining' % len(pending),flush=True)
                 if not pending or fatal or empty>=args.stop_after:
                     break
