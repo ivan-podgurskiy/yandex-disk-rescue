@@ -115,3 +115,46 @@ class DestinationTests(unittest.TestCase):
         with self.assertRaises(DestinationError):
             attempt.check()
         self.assertFalse(Path(outside,rel.split('/',1)[1]).exists())
+
+    def test_exfat_unsupported_rename_uses_exclusive_copy(self):
+        import errno
+        from unittest.mock import patch
+        rel=self.dest.map_path(self.job('/exfat'),self.store)
+        attempt=self.dest.open_attempt(self.job('/exfat'),rel)
+        self.addCleanup(attempt.discard)
+        attempt.writer.write(b'abc')
+        with patch('rescue.destination.publish_noreplace',side_effect=OSError(errno.ENOTSUP,'unsupported')):
+            attempt.commit()
+        self.assertEqual(Path(self.root,rel).read_bytes(),b'abc')
+        self.assertEqual(list(Path(self.root).rglob('*.part')),[])
+
+    def test_exfat_fallback_never_overwrites_existing_copy(self):
+        import errno
+        from unittest.mock import patch
+        rel=self.dest.map_path(self.job('/exfat-conflict'),self.store)
+        attempt=self.dest.open_attempt(self.job('/exfat-conflict'),rel)
+        self.addCleanup(attempt.discard)
+        attempt.writer.write(b'abc')
+        target=Path(self.root,rel)
+        target.write_bytes(b'keep')
+        with patch('rescue.destination.publish_noreplace',side_effect=OSError(errno.ENOTSUP,'unsupported')):
+            with self.assertRaises(FileExistsError):
+                attempt.commit()
+        self.assertEqual(target.read_bytes(),b'keep')
+
+    def test_exfat_copy_stops_on_disk_change_and_removes_only_own_partial(self):
+        import errno
+        from unittest.mock import patch
+        rel=self.dest.map_path(self.job('/exfat-interrupt'),self.store)
+        attempt=self.dest.open_attempt(self.job('/exfat-interrupt'),rel)
+        self.addCleanup(attempt.discard)
+        attempt.writer.write(b'abc')
+        original=os.write
+        def write_and_disconnect(fd,data):
+            n=original(fd,data)
+            self.volume.uuid='disconnected'
+            return n
+        with patch('rescue.destination.publish_noreplace',side_effect=OSError(errno.ENOTSUP,'unsupported')),patch('rescue.destination.os.write',side_effect=write_and_disconnect):
+            with self.assertRaises(DestinationError):
+                attempt.commit()
+        self.assertFalse(Path(self.root,rel).exists())

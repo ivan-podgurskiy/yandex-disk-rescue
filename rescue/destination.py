@@ -246,12 +246,15 @@ def publish_noreplace(fd, source, target):
 class Attempt:
     def __init__(self,destination,fd,name,job_id,rel):
         self.rel = rel
+        self.cancel = None
         self.destination,self.fd,self.name,self.job_id = destination,fd,name,job_id
         self.temp = '.yd-' + uuid.uuid4().hex + '.part'
         out = os.open(self.temp,os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,0o600,dir_fd=fd)
         self.writer = os.fdopen(out,'wb')
 
     def check(self):
+        if self.cancel is not None and self.cancel.is_set():
+            raise DestinationError('cancelled')
         self.destination.check_space()
         # Reopen the current no-follow hierarchy and compare the held parent.
         # A moved/replaced child must not receive any more data or publication.
@@ -271,7 +274,12 @@ class Attempt:
         self.writer.flush()
         os.fsync(self.writer.fileno())
         self.writer.close()
-        publish_noreplace(self.fd,self.temp,self.name)
+        try:
+            publish_noreplace(self.fd,self.temp,self.name)
+        except OSError as error:
+            if error.errno not in (errno.ENOTSUP,errno.EOPNOTSUPP):
+                raise
+            self._copy_exclusive()
         try:
             os.fsync(self.fd)
         except OSError as error:
@@ -279,6 +287,55 @@ class Attempt:
                 raise
         os.close(self.fd)
         self.fd = None
+
+    def _copy_exclusive(self):
+        """ExFAT may lack both exclusive rename and hard links.
+
+        Create the final name exclusively, then copy the already verified temp.
+        Completion is recorded only after fsync. A crash can leave an incomplete
+        named file, which is reverified/preserved on retry, never blindly reused.
+        """
+        source = os.open(self.temp,os.O_RDONLY | os.O_NOFOLLOW,dir_fd=self.fd)
+        target = None
+        owned = None
+        try:
+            self.destination.reserve(self.job_id,os.fstat(source).st_size)
+            self.check()
+            target = os.open(self.name,os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,0o600,dir_fd=self.fd)
+            owned = os.fstat(target)
+            while True:
+                self.check()
+                data = os.read(source,1024*1024)
+                if not data:
+                    break
+                remaining = memoryview(data)
+                while remaining:
+                    self.check()
+                    n = os.write(target,remaining)
+                    if n <= 0:
+                        raise OSError(errno.EIO,'short copy write')
+                    remaining = remaining[n:]
+                    self.destination.consume(self.job_id,n)
+            self.check()
+            os.fsync(target)
+            self.check()
+            os.close(target)
+            target = None
+            os.unlink(self.temp,dir_fd=self.fd)
+        except BaseException:
+            if owned is not None:
+                try:
+                    current = os.stat(self.name,dir_fd=self.fd,follow_symlinks=False)
+                    if (current.st_dev,current.st_ino)==(owned.st_dev,owned.st_ino):
+                        os.unlink(self.name,dir_fd=self.fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if target is not None:
+                os.close(target)
+            os.close(source)
+            self.destination.release(self.job_id)
 
     def discard(self):
         if self.fd is None:

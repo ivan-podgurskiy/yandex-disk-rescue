@@ -71,6 +71,7 @@ def transfer(job, client, destination, cancel, on_bytes, store=None):
             return TransferResult('preview_absent')
         destination.reserve(job.id, MAX_PREVIEW if preview else job.file.size)
         attempt = destination.open_attempt(job,rel)
+        attempt.cancel = cancel
         h = hashlib.md5()
         first = b''
         with client.open_stream(url,authenticated=preview) as src:
