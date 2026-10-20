@@ -30,7 +30,8 @@ class Application:
         self.engine=engine
         self.secret=secrets.token_urlsafe(32)
         self._lock=threading.Lock()
-        self.operation={'kind':'','state':'idle','error':''}
+        self.operation={'kind':'','state':'idle','error':'','id':0}
+        self.operation_id=0
         self.thread=None
         self.restoration_error=''
         if engine.store.has_saved_token() or (engine.destination is None and engine.store.get_setting('destination')):
@@ -55,13 +56,15 @@ class Application:
         with self._lock:
             if self.thread and self.thread.is_alive():
                 raise ValueError('operation_busy')
-            self.operation={'kind':kind,'state':'running','error':''}
+            self.operation_id+=1
+            operation_id=self.operation_id
+            self.operation={'kind':kind,'state':'running','error':'','id':operation_id}
             def run():
                 try:
                     fn()
-                    result={'kind':kind,'state':'done','error':''}
+                    result={'kind':kind,'state':'done','error':'','id':operation_id}
                 except Exception as error:
-                    result={'kind':kind,'state':'failed','error':error_code(error)}
+                    result={'kind':kind,'state':'failed','error':error_code(error),'id':operation_id}
                 with self._lock:
                     self.operation=result
             self.thread=threading.Thread(target=run,daemon=True)
@@ -108,12 +111,14 @@ class Application:
             self.submit('catalog',engine.scan_catalog)
         elif path=='/api/destination':
             root=data.get('path')
+            confirm=data.get('confirm_change',False)
+            if not isinstance(confirm,bool):raise TypeError('invalid_input')
             if not isinstance(root,str) or not os.path.isabs(root):
                 raise TypeError('invalid_input')
             def select():
                 destination=Destination.bind(root)
                 try:
-                    engine.set_destination(destination)
+                    engine.set_destination(destination,confirm_change=confirm)
                     self.restoration_error=''
                 except BaseException:
                     destination.close()

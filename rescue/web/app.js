@@ -2,8 +2,9 @@
 const $ = id => document.getElementById(id);
 let secret = '', current = null, rows = [], offset = 0, selected = new Set(), fetching = false, actionBusy = false;
 let loadedSnapshot = null, searchTimer, refreshTimer;
+let destinationDirty=false,pendingDestination=null,destinationBaseline=null;
 const labels = {pending:'В очереди',active:'Скачивается',deferred:'Повторим',verified_md5:'Проверен · MD5',verified_size:'Проверен · размер',preview_saved:'Сохранено',preview_absent:'Не предоставлено',conflict:'Локальный конфликт'};
-const errors = {catalog_changing:'Каталог меняется во время обхода. Наблюдения сохранены; продолжите получение каталога позже.',auth:'Доступ истёк или отклонён. Приостановите работу и подключите актуальный токен.',auth_required:'Сначала подключите Яндекс.Диск.',invalid_response:'Сервис вернул неполный ответ. Повторите получение каталога позже.',unavailable:'Яндекс пока не отдаёт данные. Повторите попытку позже.',timeout:'Сервер не ответил вовремя. Можно повторить попытку.',throttled:'Яндекс ограничил запросы. Приложение выдержит паузу.',missing_volume:'Накопитель не найден. Подключите выбранный диск.',wrong_volume:'По этому пути обнаружен другой том. Верните выбранный накопитель.',unsafe_path:'Небезопасный путь назначения. Проверьте папку и символические ссылки.',no_space:'Не хватает свободного места с резервом 1 ГиБ. Освободите место на диске.',disk_io:'Ошибка записи. Проверьте диск перед продолжением.',state_error:'Не удалось сохранить состояние. Остановите процесс и проверьте каталог данных.',different_account:'Этот каталог восстановления связан с другим аккаунтом. Используйте отдельный --data-dir.',different_destination:'Очередь связана с другим назначением. Выберите прежнюю папку или отдельный --data-dir.',destination_busy:'Этот диск уже используется другим процессом восстановления.',pause_required:'Сначала приостановите восстановление и дождитесь завершения записей.',writers_active:'Завершаются активные передачи. Дождитесь подтверждения паузы.',confirmation_required:'Подтвердите подключение прежнего диска кнопкой «Продолжить».',destination_required:'Сначала выберите и проверьте папку назначения.',invalid_selection:'Выбранные файлы не принадлежат этому снимку. Обновите список.',scan_active:'Каталог уже загружается.',operation_failed:'Не удалось выполнить действие. Проверьте подключение и повторите.',network_io:'Передача оборвалась. Файл будет запрошен повторно.',checksum_mismatch:'Контрольная сумма не совпала. Копия не принята.',size_mismatch:'Размер не совпал. Копия не принята.',cancelled:'Передача приостановлена.',local_conflict:'Локальный файл сохранён, требуется другая копия.',internal_error:'Восстановление остановлено из-за внутренней ошибки.',invalid_input:'Проверьте введённые данные.'};
+const errors = {catalog_changing:'Каталог меняется во время обхода. Наблюдения сохранены; продолжите получение каталога позже.',auth:'Доступ истёк или отклонён. Приостановите работу и подключите актуальный токен.',auth_required:'Сначала подключите Яндекс.Диск.',invalid_response:'Сервис вернул неполный ответ. Повторите получение каталога позже.',unavailable:'Яндекс пока не отдаёт данные. Повторите попытку позже.',timeout:'Сервер не ответил вовремя. Можно повторить попытку.',throttled:'Яндекс ограничил запросы. Приложение выдержит паузу.',missing_volume:'Накопитель не найден. Подключите выбранный диск.',wrong_volume:'По этому пути обнаружен другой том. Верните выбранный накопитель.',unsafe_path:'Небезопасный путь назначения. Проверьте папку и символические ссылки.',no_space:'Не хватает свободного места с резервом 1 ГиБ. Освободите место на диске.',disk_io:'Ошибка записи. Проверьте диск перед продолжением.',state_error:'Не удалось сохранить состояние. Остановите процесс и проверьте каталог данных.',different_account:'Этот каталог восстановления связан с другим аккаунтом. Используйте отдельный --data-dir.',different_destination:'Подтвердите смену папки назначения: прежние файлы и результаты останутся сохранены.',destination_busy:'Этот диск уже используется другим процессом восстановления.',pause_required:'Сначала приостановите восстановление и дождитесь завершения записей.',writers_active:'Завершаются активные передачи. Дождитесь подтверждения паузы.',confirmation_required:'Подтвердите подключение прежнего диска кнопкой «Продолжить».',destination_required:'Сначала выберите и проверьте папку назначения.',invalid_selection:'Выбранные файлы не принадлежат этому снимку. Обновите список.',scan_active:'Каталог уже загружается.',operation_failed:'Не удалось выполнить действие. Проверьте подключение и повторите.',network_io:'Передача оборвалась. Файл будет запрошен повторно.',checksum_mismatch:'Контрольная сумма не совпала. Копия не принята.',size_mismatch:'Размер не совпал. Копия не принята.',cancelled:'Передача приостановлена.',local_conflict:'Локальный файл сохранён, требуется другая копия.',internal_error:'Восстановление остановлено из-за внутренней ошибки.',invalid_input:'Проверьте введённые данные.'};
 const explain = code => errors[code] || 'Действие пока недоступно. Обновите состояние и повторите.';
 const count = (kind, state) => current?.counts[kind]?.[state] || 0;
 function bytes(n) { if (!Number.isFinite(n)) return '—'; const u=['Б','КБ','МБ','ГБ','ТБ']; let i=0; while(n>=1000&&i<4){n/=1000;i++;} return new Intl.NumberFormat('ru-RU',{maximumFractionDigits:i?1:0}).format(n)+' '+u[i]; }
@@ -28,7 +29,7 @@ function render(){
   const s=current, busy=actionBusy||s.operation?.state==='running', writing=s.active_jobs>0;
   text('connection-state',s.connected?'Подключён':'Не подключён');$('connection-state').classList.toggle('ready',s.connected);
   text('destination-state',s.destination&&!s.volume_error?'Проверен':'Ожидает диск');$('destination-state').classList.toggle('ready',!!s.destination&&!s.volume_error);
-  if(document.activeElement!==$('destination')&&(s.destination||s.expected_destination?.root))$('destination').value=s.destination||s.expected_destination.root;
+  if(!destinationDirty&&document.activeElement!==$('destination')&&(s.destination||s.expected_destination?.root))$('destination').value=s.destination||s.expected_destination.root;
   $('forget-token').hidden=!s.token_saved;
   $('forget-token').disabled=busy;
   text('free-space',s.free_bytes!==null?'Свободно '+bytes(s.free_bytes):'Выберите существующую папку на диске');
@@ -64,7 +65,12 @@ function render(){
   text('selection-button','Восстановить выбранные ('+selected.size+')');
   $('fixture-label').hidden=!s.fixture;
   updateFolderControls();
-  if(s.operation?.state==='failed')message(explain(s.operation.error),true);
+  if(pendingDestination&&s.operation?.id!==destinationBaseline&&s.operation?.kind==='destination'&&s.operation.state==='done'){destinationDirty=false;pendingDestination=null;}
+  if(s.operation?.id!==destinationBaseline&&s.operation?.kind==='destination'&&s.operation.state==='failed'&&s.operation.error==='different_destination'&&pendingDestination&&!$('destination-dialog').open){
+    text('old-destination-path',s.expected_destination?.root||s.destination||'—');text('new-destination-path',pendingDestination);$('destination-dialog').showModal();
+  }
+  if(s.operation?.state==='failed'&&s.operation.error==='different_destination'&&!pendingDestination)message('');
+  else if(s.operation?.state==='failed')message(explain(s.operation.error),true);
   else if(s.pause_reason&&!['user','complete'].includes(s.pause_reason))message(explain(s.pause_reason),true);
   else if(s.restoration_error)message(explain(s.restoration_error),true);
   else if(s.scan_error)message(explain(s.scan_error),true);
@@ -109,7 +115,11 @@ async function refresh(){
 $('connect-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token').value;$('token').value='';command('/api/connect',{token,remember:$('remember-token').checked});});
 $('configured-token').addEventListener('click',()=>command('/api/connect',{remember:$('remember-token').checked}));
 $('forget-token').addEventListener('click',()=>command('/api/forget-token'));
-$('destination-form').addEventListener('submit',e=>{e.preventDefault();command('/api/destination',{path:$('destination').value.trim()});});
+$('destination').addEventListener('input',()=>{destinationDirty=true;});
+$('destination-form').addEventListener('submit',e=>{e.preventDefault();pendingDestination=$('destination').value.trim();destinationBaseline=current?.operation?.id;command('/api/destination',{path:pendingDestination});});
+$('cancel-destination-change').addEventListener('click',()=>{pendingDestination=null;destinationDirty=false;$('destination-dialog').close();if(current)$('destination').value=current.destination||current.expected_destination?.root||'';});
+$('destination-dialog').addEventListener('cancel',()=>{pendingDestination=null;});
+$('confirm-destination-change').addEventListener('click',()=>{const path=pendingDestination;destinationBaseline=current?.operation?.id;$('destination-dialog').close();command('/api/destination',{path,confirm_change:true});});
 $('scan-button').addEventListener('click',()=>command('/api/catalog'));
 $('start-button').addEventListener('click',()=>command('/api/start',{previews:$('previews').checked}));
 $('pause-button').addEventListener('click',()=>command('/api/pause'));

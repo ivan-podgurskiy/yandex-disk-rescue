@@ -104,3 +104,24 @@ class PreferenceTests(unittest.TestCase):
         os.mkdir(os.path.join(self.tmp.name,'existing'))
         job=Job(1,1,CloudFile('/existing',3),'original','',1)
         self.assertNotEqual(self.dest.map_path(job,self.store),'existing')
+
+    def test_destination_switch_preserves_independent_results(self):
+        from rescue.models import TransferResult
+        a={'root':'/a','identity':{'uuid':'same-volume'}}
+        b={'root':'/b','identity':{'uuid':'same-volume'}}
+        self.store.set_setting('destination',a)
+        sid=self.store.begin_snapshot()
+        self.store.record_page(sid,[CloudFile('/x',3)],1)
+        self.store.enqueue(sid,False)
+        job=self.store.claim_job(100)
+        self.store.complete_job(job.id,TransferResult('verified_size',verification='size'))
+        self.store.switch_destination(b)
+        self.assertEqual(self.store.summary()['verified_bytes'],0)
+        self.assertEqual(self.store.claim_job(100).attempts,1)
+        self.store.complete_job(job.id,TransferResult('deferred',error_code='unavailable',retry_at=150))
+        self.store.switch_destination(a)
+        self.assertEqual(self.store.summary()['verified_bytes'],3)
+        self.assertIsNone(self.store.claim_job(100))
+        self.store.switch_destination(b)
+        self.assertIsNone(self.store.claim_job(149))
+        self.assertEqual(self.store.claim_job(150).attempts,2)

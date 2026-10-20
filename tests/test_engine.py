@@ -140,3 +140,18 @@ class EngineTests(unittest.TestCase):
         reopened=Engine(self.store,self.client,self.dest,workers=1)
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.status()['destination'],self.dest.root)
+
+    def test_destination_change_requires_confirmation_and_preserves_old_files(self):
+        from pathlib import Path
+        newroot=os.path.join(self.tmp.name,'new-destination')
+        os.mkdir(newroot)
+        oldfile=Path(self.dest.root,'keep.txt')
+        oldfile.write_text('keep')
+        destination=Destination.bind(newroot,identify=self.volume.identify,capacity=self.volume.capacity)
+        self.addCleanup(destination.close)
+        with self.assertRaisesRegex(ValueError,'different_destination'):
+            self.engine.set_destination(destination)
+        self.engine.set_destination(destination,confirm_change=True)
+        self.assertEqual(self.engine.destination.root,os.path.realpath(newroot))
+        self.assertEqual(oldfile.read_text(),'keep')
+        self.assertFalse(self.engine.status()['running'])

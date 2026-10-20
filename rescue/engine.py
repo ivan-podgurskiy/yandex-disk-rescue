@@ -72,22 +72,25 @@ class Engine:
             with self._lock:
                 self._connecting = False
 
-    def set_destination(self,destination):
+    def set_destination(self,destination,confirm_change=False):
         with self._lock:
             if self._active or self._running:
                 raise ValueError('pause_required')
             destination.check()
             previous = self.store.get_setting('destination')
             chosen = {'root':destination.root,'identity':destination.identity}
-            if previous and (previous['root'] != chosen['root'] or previous['identity']['uuid'] != chosen['identity']['uuid']):
+            changed=bool(previous and (previous['root'] != chosen['root'] or previous['identity']['uuid'] != chosen['identity']['uuid']))
+            if changed and not confirm_change:
                 # A new target must not inherit verification results from another disk.
                 raise ValueError('different_destination')
             if self.destination and self.destination is not destination:
                 self.destination.close()
                 self.destination = None
             destination.acquire()
+            self.store.switch_destination(chosen)
             self.destination = destination
-            self.store.set_setting('destination',chosen)
+            if changed:
+                self._pause_reason = 'user'
 
     def scan_catalog(self):
         with self._lock:

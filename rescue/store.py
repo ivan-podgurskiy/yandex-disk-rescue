@@ -41,7 +41,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS path_nodes(scope TEXT,kind TEXT,cloud_path TEXT,rel TEXT,key TEXT,
                     PRIMARY KEY(scope,kind,cloud_path),UNIQUE(scope,key));
                 CREATE TABLE IF NOT EXISTS job_selection(file_id INTEGER PRIMARY KEY);
-                PRAGMA user_version=2;
+                CREATE TABLE IF NOT EXISTS destination_jobs(
+                    scope TEXT,job_id INTEGER,status TEXT,attempts INTEGER,retry_at REAL,
+                    error_code TEXT,verification TEXT,written_bytes INTEGER,
+                    PRIMARY KEY(scope,job_id));
+                PRAGMA user_version=3;
             ''')
         os.chmod(self.path, 0o600)
 
@@ -329,3 +333,17 @@ class Store:
     def has_saved_token(self):
         with self.connect() as db:
             return db.execute("SELECT 1 FROM secrets WHERE key='oauth'").fetchone() is not None
+
+    def switch_destination(self, chosen):
+        """Atomically switch queue results; files/mappings in other roots stay intact."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute("SELECT value FROM settings WHERE key='destination'").fetchone()
+            previous=json.loads(row[0]) if row else None
+            def scope(value):return value['identity']['uuid']+':'+value['root']
+            if previous and scope(previous)!=scope(chosen):
+                db.execute('INSERT OR REPLACE INTO destination_jobs SELECT ?,id,status,attempts,retry_at,error_code,verification,written_bytes FROM jobs',(scope(previous),))
+                db.execute("UPDATE jobs SET status='pending',attempts=0,retry_at=0,error_code='',verification='',written_bytes=0")
+                saved=db.execute('SELECT status,attempts,retry_at,error_code,verification,written_bytes,job_id FROM destination_jobs WHERE scope=?',(scope(chosen),)).fetchall()
+                db.executemany('UPDATE jobs SET status=?,attempts=?,retry_at=?,error_code=?,verification=?,written_bytes=? WHERE id=?',saved)
+            db.execute("INSERT OR REPLACE INTO settings VALUES('destination',?)",(json.dumps(chosen),))

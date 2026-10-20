@@ -45,5 +45,13 @@
     <div class="table-footer"><span id="page-info">Нет файлов</span><div><button id="previous-page" class="button small secondary" disabled>← Назад</button><button id="next-page" class="button small secondary" disabled>Далее →</button></div></div>
   </section>
   <footer class="page-footer"><span>Только чтение облака. Ничего не удаляем.</span><span>Disk Rescue · Независимый проект · MIT</span></footer>
+<dialog id="destination-dialog" aria-labelledby="destination-dialog-title">
+  <h2 id="destination-dialog-title">Сменить папку назначения?</h2>
+  <p>Текущее назначение: <strong id="old-destination-path"></strong></p>
+  <p>Новое назначение: <strong id="new-destination-path"></strong></p>
+  <p>В новой папке будет отдельная копия с собственной очередью и результатами. Уже скачанные файлы останутся в прежней папке — переносить или удалять их приложение не будет.</p>
+  <p>При возврате к прежней папке её результаты восстановятся. Загрузка начнётся только по вашей команде.</p>
+  <div class="dialog-controls"><button id="cancel-destination-change" class="button secondary">Оставить прежнюю</button><button id="confirm-destination-change" class="button primary">Использовать новую папку</button></div>
+</dialog>
 </main></div>
 </body></html>
