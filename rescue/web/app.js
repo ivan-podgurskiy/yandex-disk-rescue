@@ -28,7 +28,9 @@ function render(){
   const s=current, busy=actionBusy||s.operation?.state==='running', writing=s.active_jobs>0;
   text('connection-state',s.connected?'Подключён':'Не подключён');$('connection-state').classList.toggle('ready',s.connected);
   text('destination-state',s.destination&&!s.volume_error?'Проверен':'Ожидает диск');$('destination-state').classList.toggle('ready',!!s.destination&&!s.volume_error);
-  if(s.destination&&document.activeElement!==$('destination'))$('destination').value=s.destination;
+  if(document.activeElement!==$('destination')&&(s.destination||s.expected_destination?.root))$('destination').value=s.destination||s.expected_destination.root;
+  $('forget-token').hidden=!s.token_saved;
+  $('forget-token').disabled=busy;
   text('free-space',s.free_bytes!==null?'Свободно '+bytes(s.free_bytes):'Выберите существующую папку на диске');
   text('catalog-bytes',bytes(s.catalog_bytes));text('catalog-count',s.catalog_files.toLocaleString('ru-RU')+' файлов / версий');text('files-count',s.catalog_files.toLocaleString('ru-RU'));
   text('verified-bytes',bytes(s.verified_bytes));text('verified-count',(count('original','verified_md5')+count('original','verified_size')).toLocaleString('ru-RU')+' проверенных файлов');
@@ -61,8 +63,10 @@ function render(){
   $('selection-button').disabled=busy||s.running||writing||!s.connected||!s.destination||!!s.volume_error||!selected.size;
   text('selection-button','Восстановить выбранные ('+selected.size+')');
   $('fixture-label').hidden=!s.fixture;
+  updateFolderControls();
   if(s.operation?.state==='failed')message(explain(s.operation.error),true);
   else if(s.pause_reason&&!['user','complete'].includes(s.pause_reason))message(explain(s.pause_reason),true);
+  else if(s.restoration_error)message(explain(s.restoration_error),true);
   else if(s.scan_error)message(explain(s.scan_error),true);
   else if(s.operation?.state==='running')message('Выполняем: '+({connect:'проверка доступа',destination:'проверка диска',catalog:'получение каталога',start:'запуск',resume:'продолжение'}[s.operation.kind]||'действие')+'…');
   else if(s.operation?.state==='done')message('');
@@ -98,12 +102,13 @@ async function loadRows(){
 async function refresh(){
   if(fetching)return;
   fetching=true;
-  try{current=await api('/api/status');$('network-error').hidden=true;render();await loadRows();}
+  try{current=await api('/api/status');$('network-error').hidden=true;render();await loadRows();if($('folder-panel').open)await loadFolders();}
   catch(e){$('network-error').hidden=false;}
   finally{fetching=false;}
 }
-$('connect-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token').value;$('token').value='';command('/api/connect',{token});});
-$('configured-token').addEventListener('click',()=>command('/api/connect',{}));
+$('connect-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token').value;$('token').value='';command('/api/connect',{token,remember:$('remember-token').checked});});
+$('configured-token').addEventListener('click',()=>command('/api/connect',{remember:$('remember-token').checked}));
+$('forget-token').addEventListener('click',()=>command('/api/forget-token'));
 $('destination-form').addEventListener('submit',e=>{e.preventDefault();command('/api/destination',{path:$('destination').value.trim()});});
 $('scan-button').addEventListener('click',()=>command('/api/catalog'));
 $('start-button').addEventListener('click',()=>command('/api/start',{previews:$('previews').checked}));
@@ -115,6 +120,57 @@ $('previous-page').addEventListener('click',()=>{offset=Math.max(0,offset-100);r
 $('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{offset=0;refresh();},250);});
 $('state-filter').addEventListener('change',()=>{offset=0;refresh();});
 $('export-button').addEventListener('click',async()=>{try{const response=await fetch('/api/export.csv',{headers:{'X-Session-Secret':secret}});if(!response.ok)throw new Error('Не удалось экспортировать отчёт.');const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download='disk-rescue-report.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){message(e.message,true);}});
+let folderRows=[],folderRules=new Map(),folderSnapshot=null,folderCacheKey='';
+function folderUnder(path,parent){return path!==parent&&(parent==='/'||path.startsWith(parent+'/'));}
+function folderState(path,strict=false){
+  let match='',chosen=false;
+  for(const [p,value] of folderRules){if((!strict&&path===p)||folderUnder(path,p)){if(p.length>match.length){match=p;chosen=value;}}}
+  return chosen;
+}
+function folderTotals(){
+  const byPath=new Map(folderRows.map(r=>[r.path,r]));let files=0,size=0;
+  for(const [path,chosen] of folderRules){const r=byPath.get(path);if(r&&chosen!==folderState(path,true)){const sign=chosen?1:-1;files+=sign*r.files;size+=sign*r.bytes;}}
+  return {files,size};
+}
+function updateFolderControls(){
+  if(!current)return;
+  const totals=folderTotals();
+  text('folder-total',totals.files.toLocaleString('ru-RU')+' файлов · '+bytes(totals.size)+' выбрано');
+  $('folder-start').disabled=actionBusy||current.operation?.state==='running'||current.running||current.active_jobs>0||!current.connected||!current.destination||!!current.volume_error||totals.files===0;
+  for(const input of document.querySelectorAll('#folder-tree input')){
+    const path=input.dataset.path;input.checked=folderState(path);
+    input.indeterminate=[...folderRules].some(([p,v])=>folderUnder(p,path)&&p!==path&&v!==input.checked);
+  }
+}
+function drawFolders(){
+  const children=new Map();
+  for(const row of folderRows){if(row.path==='/')continue;const parent=row.path.slice(0,row.path.lastIndexOf('/'))||'/';if(!children.has(parent))children.set(parent,[]);children.get(parent).push(row);}
+  function node(row){
+    const details=document.createElement('details');details.className='folder-node';
+    const summary=document.createElement('summary');
+    const input=document.createElement('input');input.type='checkbox';input.dataset.path=row.path;input.setAttribute('aria-label','Выбрать папку '+row.path);
+    input.addEventListener('click',e=>e.stopPropagation());
+    input.addEventListener('change',()=>{for(const p of [...folderRules.keys()])if(folderUnder(p,row.path))folderRules.delete(p);folderRules.set(row.path,input.checked);updateFolderControls();});
+    const name=document.createElement('span');name.className='folder-name';name.textContent=row.path==='/'?'Весь Яндекс.Диск':row.path.split('/').pop();
+    const size=document.createElement('span');size.className='folder-size';size.textContent=row.files.toLocaleString('ru-RU')+' · '+bytes(row.bytes);
+    summary.append(input,name,size);details.append(summary);
+    let built=false;
+    details.addEventListener('toggle',()=>{if(details.open&&!built){built=true;const group=document.createElement('div');group.className='folder-children';for(const child of children.get(row.path)||[])group.append(node(child));details.append(group);updateFolderControls();}});
+    return details;
+  }
+  $('folder-tree').replaceChildren();const root=folderRows.find(r=>r.path==='/');if(root){const el=node(root);$('folder-tree').append(el);el.open=true;}
+  updateFolderControls();
+}
+async function loadFolders(){
+  if(!current?.snapshot)return;
+  const sid=current.snapshot.id,key=sid+':'+current.catalog_files+':'+current.snapshot.cursor+':'+current.snapshot.complete;
+  if(folderCacheKey===key)return;
+  const data=await api('/api/folders?snapshot_id='+sid);
+  if(folderSnapshot!==sid){folderRules.clear();folderSnapshot=sid;const saved=current.folder_selection;if(saved?.snapshot_id===sid){for(const p of saved.included||[])folderRules.set(p,true);for(const p of saved.excluded||[])folderRules.set(p,false);}}
+  folderRows=data.folders;folderCacheKey=key;drawFolders();
+}
+$('folder-panel').addEventListener('toggle',()=>{if($('folder-panel').open)loadFolders().catch(e=>message(e.message,true));});
+$('folder-start').addEventListener('click',()=>command('/api/start',{previews:$('previews').checked,folders:[...folderRules].filter(([,v])=>v).map(([p])=>p),excluded_folders:[...folderRules].filter(([,v])=>!v).map(([p])=>p),snapshot_id:folderSnapshot}));
 async function boot(){try{const response=await fetch('/api/bootstrap',{cache:'no-store'});if(!response.ok)throw new Error();secret=(await response.json()).secret;await refresh();refreshTimer=setTimeout(tick,2000);}catch{$('network-error').hidden=false;setTimeout(boot,2000);}}
 async function tick(){await refresh();refreshTimer=setTimeout(tick,2000);}
 boot();

@@ -32,6 +32,24 @@ class Application:
         self._lock=threading.Lock()
         self.operation={'kind':'','state':'idle','error':''}
         self.thread=None
+        self.restoration_error=''
+        if engine.store.has_saved_token() or (engine.destination is None and engine.store.get_setting('destination')):
+            self.submit('restore',self.restore)
+
+    def restore(self):
+        engine=self.engine
+        saved=engine.store.get_setting('destination')
+        if saved and engine.destination is None:
+            destination=None
+            try:
+                destination=Destination.bind(saved['root'])
+                engine.set_destination(destination)
+            except Exception as error:
+                if destination:destination.close()
+                self.restoration_error=error_code(error)
+        token=engine.store.saved_token()
+        if token:
+            engine.connect(YandexClient(token))
 
     def submit(self,kind,fn):
         with self._lock:
@@ -51,6 +69,9 @@ class Application:
 
     def status(self):
         data=self.engine.status()
+        data['token_saved']=self.engine.store.has_saved_token()
+        data['restoration_error']=self.restoration_error
+        data['folder_selection']=self.engine.store.get_setting('folder_selection')
         with self._lock:
             data['operation']=dict(self.operation)
         return data
@@ -59,6 +80,8 @@ class Application:
         engine=self.engine
         if path=='/api/connect':
             token=data.get('token')
+            remember=data.get('remember',False)
+            if not isinstance(remember,bool):raise TypeError('invalid_input')
             if token is not None and not isinstance(token,str):
                 raise TypeError('invalid_input')
             def connect():
@@ -73,7 +96,14 @@ class Application:
                         except OSError:
                             raise ApiError('auth') from None
                 engine.connect(YandexClient(selected))
+                if remember:
+                    engine.store.save_token(selected)
+                else:
+                    engine.store.forget_token()
             self.submit('connect',connect)
+        elif path=='/api/forget-token':
+            engine.store.forget_token()
+            return 200
         elif path=='/api/catalog':
             self.submit('catalog',engine.scan_catalog)
         elif path=='/api/destination':
@@ -84,6 +114,7 @@ class Application:
                 destination=Destination.bind(root)
                 try:
                     engine.set_destination(destination)
+                    self.restoration_error=''
                 except BaseException:
                     destination.close()
                     raise
@@ -92,11 +123,24 @@ class Application:
             previews=data.get('previews',True)
             ids=data.get('file_ids')
             sid=data.get('snapshot_id')
+            folders=data.get('folders')
+            excluded=data.get('excluded_folders',[])
+            if folders is not None:
+                if ids is not None or not isinstance(folders,list) or not isinstance(excluded,list) or not all(isinstance(p,str) for p in folders+excluded):
+                    raise TypeError('invalid_input')
+                if sid is None:
+                    snap=engine.store.snapshot()
+                    sid=snap['id'] if snap else -1
             if (not isinstance(previews,bool) or
                 (ids is not None and (not isinstance(ids,list) or not all(type(i) is int and i>0 for i in ids))) or
                 (sid is not None and (type(sid) is not int or sid<1))):
                 raise TypeError('invalid_input')
-            self.submit('start',lambda:engine.start(previews,ids,sid))
+            def start():
+                chosen=engine.store.folder_file_ids(sid,folders,excluded) if folders is not None else ids
+                if folders is not None and not chosen:raise ValueError('invalid_selection')
+                engine.start(previews,chosen,sid)
+                engine.store.set_setting('folder_selection',{'snapshot_id':sid,'included':folders,'excluded':excluded} if folders is not None else None)
+            self.submit('start',start)
         elif path=='/api/resume':
             confirm=data.get('confirm_destination',False)
             if not isinstance(confirm,bool):
@@ -168,6 +212,12 @@ def create_server(engine,data_dir,port=8765):
                     self.reply(200,{'secret':app.secret})
                 elif u.path=='/api/status':
                     self.reply(200,app.status())
+                elif u.path=='/api/folders':
+                    params=parse_qs(u.query)
+                    value=params.get('snapshot_id',[None])[0]
+                    snapshot=engine.store.snapshot(int(value) if value else None)
+                    self.reply(200,{'snapshot_id':snapshot['id'] if snapshot else None,
+                                    'folders':engine.store.folders(snapshot['id']) if snapshot else []})
                 elif u.path=='/api/files':
                     params=parse_qs(u.query)
                     offset=int(params.get('offset',['0'])[0])

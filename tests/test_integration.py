@@ -60,7 +60,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         file=CloudFile(row['path'],row['size'],row['md5'],row['media_type'],row['resource_id'])
         rel=self.engine.destination.map_path(Job(1,row['id'],file,'original','',1),self.store)
         old=Path(self.root,rel)
-        old.parent.mkdir(parents=True)
+        old.parent.mkdir(parents=True,exist_ok=True)
         old.write_bytes(b'bad')
         self.request('/api/start',{'previews':True})
         wait_for(lambda:self.store.summary()['counts']['original'].get('verified_md5')==3)
@@ -74,7 +74,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.engine.start(True)
         wait_for(lambda:self.store.summary()['counts']['original'].get('verified_md5')==4)
         self.assertEqual(old.read_bytes(),b'bad')
-        content=[p.read_bytes() for p in Path(self.root,'originals').rglob('*') if p.is_file()]
+        content=[Path(r['local_original']).read_bytes() for r in self.store.files() if r['original_status'] in ('verified_md5','verified_size')]
         for b in self.transport.data.values():
             self.assertIn(b,content)
         flaky=next(r for r in self.store.files() if r['path']=='/flaky')

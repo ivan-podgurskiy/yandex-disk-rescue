@@ -45,7 +45,7 @@ class TransferTests(unittest.TestCase):
         self.assertFalse(self.target().exists())
 
     def test_existing_conflict_is_preserved(self):
-        self.target().parent.mkdir(parents=True)
+        self.target().parent.mkdir(parents=True,exist_ok=True)
         self.target().write_bytes(b'old')
         self.assertEqual(self.run_job().status,'verified_md5')
         self.assertEqual(self.target().read_bytes(),b'old')

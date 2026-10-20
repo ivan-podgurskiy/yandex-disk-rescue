@@ -1,5 +1,7 @@
 """Short independent SQLite transactions; never share connections across threads."""
 import json
+import hashlib
+import unicodedata
 import os
 import sqlite3
 import time
@@ -35,7 +37,11 @@ class Store:
                     scope TEXT, file_id INTEGER, kind TEXT, rel TEXT, key TEXT,
                     PRIMARY KEY(scope,file_id,kind), UNIQUE(scope,key));
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY,value TEXT);
+                CREATE TABLE IF NOT EXISTS path_nodes(scope TEXT,kind TEXT,cloud_path TEXT,rel TEXT,key TEXT,
+                    PRIMARY KEY(scope,kind,cloud_path),UNIQUE(scope,key));
+                CREATE TABLE IF NOT EXISTS job_selection(file_id INTEGER PRIMARY KEY);
+                PRAGMA user_version=2;
             ''')
         os.chmod(self.path, 0o600)
 
@@ -43,6 +49,7 @@ class Store:
     def connect(self):
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA secure_delete=ON")
         try:
             with db:
                 yield db
@@ -81,7 +88,8 @@ class Store:
             if file_ids is not None:
                 if not set(file_ids).issubset({r['id'] for r in rows}):
                     raise ValueError('invalid_selection')
-                rows = [r for r in rows if r['id'] in file_ids]
+                selected=set(file_ids)
+                rows = [r for r in rows if r['id'] in selected]
             for row in rows:
                 kinds = ['original']
                 if previews and (row['media_type'] == 'image' or row['path'].lower().endswith(IMAGE_EXT)):
@@ -97,8 +105,7 @@ class Store:
             if file_ids is not None:
                 if not file_ids:
                     return None
-                sql += ' AND file_id IN (' + ','.join('?' for _ in file_ids) + ')'
-                args.extend(file_ids)
+                sql += ' AND file_id IN (SELECT file_id FROM job_selection)'
             row = db.execute(sql+' ORDER BY attempts,id LIMIT 1',args).fetchone()
             if not row:
                 return None
@@ -194,9 +201,15 @@ class Store:
             stem,ext = os.path.splitext(current)
             for i in range(1,1000):
                 rel = stem + '-recovered-' + str(i) + ext
+                key=unicodedata.normalize('NFC',rel).casefold()
+                prefix=key+'/'
+                if db.execute('SELECT 1 FROM path_nodes WHERE scope=? AND key=?',(scope,key)).fetchone():
+                    continue
+                if db.execute('SELECT 1 FROM mappings WHERE scope=? AND key>=? AND key<? LIMIT 1',(scope,prefix,prefix+'\U0010ffff')).fetchone():
+                    continue
                 try:
                     db.execute('UPDATE mappings SET rel=?,key=? WHERE scope=? AND file_id=? AND kind=?',
-                               (rel,rel.casefold(),scope,file_id,kind))
+                               (rel,key,scope,file_id,kind))
                     return rel
                 except sqlite3.IntegrityError:
                     continue
@@ -208,8 +221,7 @@ class Store:
         if file_ids is not None:
             if not file_ids:
                 return 0
-            sql += ' AND file_id IN (' + ','.join('?' for _ in file_ids) + ')'
-            args.extend(file_ids)
+            sql += ' AND file_id IN (SELECT file_id FROM job_selection)'
         with self.connect() as db:
             return db.execute(sql,args).fetchone()[0]
 
@@ -220,3 +232,100 @@ class Store:
     def rewind_snapshot(self, snapshot_id):
         with self.connect() as db:
             db.execute('UPDATE snapshots SET cursor=0 WHERE id=?',(snapshot_id,))
+
+    def set_active_selection(self, file_ids):
+        with self.connect() as db:
+            db.execute('DELETE FROM job_selection')
+            if file_ids is not None:
+                db.executemany('INSERT OR IGNORE INTO job_selection VALUES(?)',((i,) for i in file_ids))
+
+    def save_token(self, token):
+        if not isinstance(token,str) or not token.strip() or any(c in token for c in '\r\n'):
+            raise ValueError('invalid_input')
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO secrets VALUES('oauth',?)",(token.strip(),))
+
+    def saved_token(self):
+        with self.connect() as db:
+            row=db.execute("SELECT value FROM secrets WHERE key='oauth'").fetchone()
+            return row[0] if row else None
+
+    def forget_token(self):
+        with self.connect() as db:
+            db.execute("DELETE FROM secrets WHERE key='oauth'")
+        with self.connect() as db:
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+
+    def folders(self, snapshot_id):
+        with self.connect() as db:
+            rows=db.execute('SELECT f.path,f.size FROM files f JOIN members m ON m.file_id=f.id WHERE m.snapshot_id=?',(snapshot_id,)).fetchall()
+        folders={'/':{'path':'/','files':0,'bytes':0}}
+        for row in rows:
+            parts=row['path'].strip('/').split('/')
+            for n in range(len(parts)):
+                path='/'+'/'.join(parts[:n])
+                item=folders.setdefault(path,{'path':path,'files':0,'bytes':0})
+                item['files']+=1
+                item['bytes']+=row['size']
+        return sorted(folders.values(),key=lambda r:r['path'])
+
+    def folder_file_ids(self, snapshot_id, included, excluded=()):
+        def valid(path):
+            return isinstance(path,str) and path.startswith('/') and not any(p in ('.','..') for p in path.split('/'))
+        if not included or not all(valid(p) for p in list(included)+list(excluded)):
+            raise ValueError('invalid_selection')
+        def matches(path,folder):
+            return folder=='/' or path.startswith(folder.rstrip('/')+'/')
+        with self.connect() as db:
+            rows=db.execute('SELECT f.id,f.path FROM files f JOIN members m ON m.file_id=f.id WHERE m.snapshot_id=? ORDER BY f.id',(snapshot_id,)).fetchall()
+        rules=sorted([(p,True) for p in included]+[(p,False) for p in excluded],key=lambda r:len(r[0]),reverse=True)
+        return [r['id'] for r in rows if next((chosen for p,chosen in rules if matches(r['path'],p)),False)]
+
+    def allocate_natural_mapping(self, scope, job, components, conflicts=None):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing=db.execute('SELECT rel FROM mappings WHERE scope=? AND file_id=? AND kind=?',(scope,job.file_id,job.kind)).fetchone()
+            if existing:
+                return existing[0]
+            # Reserve app namespaces even when mapping an original first.
+            for reserved in ('.rescue-previews','.yd-rescue.lock','_pending_download.csv','_pending_previews.csv'):
+                db.execute('INSERT OR IGNORE INTO path_nodes VALUES(?,?,?,?,?)',(scope,'internal',reserved,reserved,reserved))
+            parent='.rescue-previews' if job.kind=='preview' else ''
+            cloud=[]
+            for index,(raw,clean) in enumerate(components):
+                cloud.append(raw)
+                last=index==len(components)-1
+                node='/'+'/'.join(cloud)+(('\0v'+str(job.file_id)) if last else '')
+                kind=job.kind
+                existing=db.execute('SELECT rel FROM path_nodes WHERE scope=? AND kind=? AND cloud_path=?',(scope,kind,node)).fetchone()
+                if existing:
+                    parent=existing[0]
+                    continue
+                stem,ext=os.path.splitext(clean)
+                digest=hashlib.sha256(raw.encode()).hexdigest()[:8]
+                for attempt in range(1000):
+                    suffix='' if attempt==0 else '~'+digest+('-'+str(attempt) if attempt>1 else '')
+                    name=stem+suffix+ext
+                    rel=(parent+'/' if parent else '')+name
+                    key=unicodedata.normalize('NFC',rel).casefold()
+                    if db.execute('SELECT 1 FROM mappings WHERE scope=? AND key=?',(scope,key)).fetchone():
+                        continue
+                    prefix=key+'/'
+                    if last and db.execute('SELECT 1 FROM mappings WHERE scope=? AND key>=? AND key<? LIMIT 1',(scope,prefix,prefix+'\U0010ffff')).fetchone():
+                        continue
+                    if conflicts and conflicts(rel,not last):
+                        continue
+                    try:
+                        db.execute('INSERT INTO path_nodes VALUES(?,?,?,?,?)',(scope,kind,node,rel,key))
+                        parent=rel
+                        break
+                    except sqlite3.IntegrityError:
+                        continue
+                else:
+                    raise ValueError('path_collision')
+            db.execute('INSERT INTO mappings VALUES(?,?,?,?,?)',(scope,job.file_id,job.kind,parent,unicodedata.normalize('NFC',parent).casefold()))
+            return parent
+
+    def has_saved_token(self):
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM secrets WHERE key='oauth'").fetchone() is not None

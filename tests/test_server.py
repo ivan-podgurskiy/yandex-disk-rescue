@@ -121,3 +121,29 @@ class ServerTests(unittest.TestCase):
         self.assertIsNone(data['destination'])
         self.assertTrue(data['safe_to_disconnect'])
         self.assertEqual(data['verified_bytes'],0)
+
+    def test_saved_connection_restores_without_exposing_token(self):
+        from unittest.mock import patch
+        from rescue.server import Application
+        self.store.save_token('fixture-secret')
+        self.engine.pause()
+        with patch('rescue.server.YandexClient',return_value=FakeClient()):
+            app=Application(self.engine)
+            if app.thread:app.thread.join(2)
+        self.assertTrue(app.status()['connected'])
+        self.assertTrue(app.status()['token_saved'])
+        self.assertNotIn('fixture-secret',json.dumps(app.status()))
+
+    def test_forget_token_is_explicit_and_secret_is_not_returned(self):
+        self.store.save_token('fixture-secret')
+        code,body=self.request('POST','/api/forget-token',{})
+        self.assertEqual(code,200)
+        self.assertIsNone(self.store.saved_token())
+        self.assertNotIn(b'fixture-secret',body)
+
+    def test_folder_api_exposes_tree_and_accepts_folder_start(self):
+        sid=self.store.begin_snapshot()
+        self.store.record_page(sid,[CloudFile('/Фото/a',3),CloudFile('/Документы/b',4)],2)
+        code,body=self.request('GET','/api/folders?snapshot_id='+str(sid))
+        self.assertEqual(code,200)
+        self.assertIn('/Фото',[r['path'] for r in json.loads(body)['folders']])

@@ -110,8 +110,8 @@ class DestinationTests(unittest.TestCase):
         attempt=self.dest.open_attempt(self.job('/folder/a'),rel)
         self.addCleanup(attempt.discard)
         outside=os.path.join(self.tmp.name,'moved')
-        os.rename(os.path.join(self.root,'originals'),outside)
-        os.symlink(outside,os.path.join(self.root,'originals'))
+        os.rename(os.path.join(self.root,rel.split('/')[0]),outside)
+        os.symlink(outside,os.path.join(self.root,rel.split('/')[0]))
         with self.assertRaises(DestinationError):
             attempt.check()
         self.assertFalse(Path(outside,rel.split('/',1)[1]).exists())

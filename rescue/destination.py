@@ -134,30 +134,35 @@ class Destination:
         existing = store.mapping(self.scope,job.file_id,job.kind)
         if existing:
             return existing
-        # Hash every raw component, including directories: file/directory and
-        # normalization collisions cannot alias even on case-insensitive volumes.
-        components = []
+        components=[]
         for raw in job.file.path.split('/'):
             if not raw:
                 continue
             if raw in ('.','..') or '\x00' in raw:
                 raise DestinationError('unsafe_path')
-            clean = ''.join('_' if c in '<>:"|?*\\' or ord(c)<32 else c for c in unicodedata.normalize('NFC',raw)).rstrip(' .') or '_'
-            while len(clean.encode('utf-8')) > 140:
-                clean = clean[:-1]
-            stem,ext = os.path.splitext(clean)
-            components.append(stem + '~' + hashlib.sha256(raw.encode()).hexdigest()[:12] + ext)
-        prefix = 'originals' if job.kind == 'original' else 'previews'
-        base = '/'.join([prefix] + components)
+            clean=''.join('_' if c in '<>:"|?*\\' or ord(c)<32 else c for c in unicodedata.normalize('NFC',raw)).rstrip(' .') or '_'
+            while len(clean.encode('utf-8'))>220:
+                clean=clean[:-1]
+            if clean.split('.')[0].upper() in {'CON','PRN','AUX','NUL'} | {'COM'+str(i) for i in range(1,10)} | {'LPT'+str(i) for i in range(1,10)}:
+                clean='_'+clean
+            components.append((raw,clean))
         if not components:
             raise DestinationError('unsafe_path')
-        stem,ext = os.path.splitext(base)
-        def candidates():
-            for i in range(100):
-                # file version suffix prevents changed contents from replacing old copy.
-                rel = stem + '~v' + str(job.file_id) + (('-'+str(i)) if i else '') + ext
-                yield rel, unicodedata.normalize('NFC',rel).casefold()
-        return store.allocate_mapping(self.scope,job.file_id,job.kind,candidates())
+        return store.allocate_natural_mapping(self.scope,job,components,self._path_conflict)
+
+    def _path_conflict(self,rel,directory):
+        try:
+            fd,name=self._parent(rel)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                found=os.stat(name,dir_fd=fd,follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return not (stat.S_ISDIR(found.st_mode) if directory else stat.S_ISREG(found.st_mode))
+        finally:
+            os.close(fd)
 
     def _parent(self, rel, create=False):
         self.check()

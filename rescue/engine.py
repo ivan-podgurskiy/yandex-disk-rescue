@@ -34,6 +34,7 @@ class Engine:
         self._connecting = False
         self._previews = self.store.get_setting('previews',True)
         self._selection = self.store.get_setting('selection')
+        self.store.set_active_selection(self._selection)
         self._throttle_until = 0
         self._transferred = 0
         self._samples = deque()
@@ -158,6 +159,7 @@ class Engine:
             self.store.enqueue(snapshot_id,previews,file_ids)
             self._previews = previews
             self._selection = file_ids
+            self.store.set_active_selection(file_ids)
             self.store.set_setting('previews',previews)
             self.store.set_setting('selection',file_ids)
             try:
@@ -282,7 +284,7 @@ class Engine:
             now=self.clock()
             samples=[(t,n) for t,n in self._samples if t>=now-10]
             data.update(connected=self.connected,scanning=self._scanning,scan_error=self._scan_error,
-                        snapshot=self.store.snapshot(),running=self._running,previews=self._previews,selection=self._selection,pause_reason=self._pause_reason,
+                        snapshot=self.store.snapshot(),running=self._running,previews=self._previews,selection_count=len(self._selection) if self._selection is not None else None,pause_reason=self._pause_reason,
                         active_jobs=len(self._active),safe_to_disconnect=not self._running and not self._active,
                         transferred_bytes=self._transferred,speed_bps=sum(n for _,n in samples)/10,
                         retry_in=max(0,self._throttle_until-now),free_bytes=free,

@@ -53,13 +53,13 @@ class CliTransferTests(unittest.TestCase):
                 store.record_page(sid,files,len(files))
                 rel=dest.map_path(Job(1,1,files[0],'original','',1),store)
                 path=Path(out,rel)
-                path.parent.mkdir(parents=True)
+                path.parent.mkdir(parents=True,exist_ok=True)
                 path.write_bytes(b'old')
                 dest.close()
             args=argparse.Namespace(list=listing,dest=out,workers=2,pause=0,stop_after=1,timeout=1,only_ext=None,size='XXXL')
             with patch('rescue.cli.YandexClient',return_value=client),patch('rescue.cli.Destination.bind',side_effect=fixture_bind),patch('rescue.cli.cli_state_path',return_value=os.path.join(root,'internal.sqlite')):
                 run_transfer_command(args,'fixture',False)
-            saved=[p.read_bytes() for p in Path(out,'originals').rglob('*') if p.is_file()]
+            saved=[p.read_bytes() for p in Path(out).rglob('*') if p.is_file()]
             for b in data.values():
                 self.assertIn(b,saved)
             if preexisting:
