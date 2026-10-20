@@ -157,7 +157,7 @@ class Store:
             row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
             return json.loads(row[0]) if row else default
 
-    def files(self, snapshot_id=None, offset=0, limit=200, query='', state=''):
+    def files(self, snapshot_id=None, offset=0, limit=200, query='', state='', recovery_only=False, parent=None):
         sql = '''SELECT f.*, o.status AS original_status, p.status AS preview_status,
                  o.error_code, o.attempts, o.verification, p.error_code AS preview_error, p.attempts AS preview_attempts,
                  mo.rel AS local_original, mp.rel AS local_preview FROM files f
@@ -168,6 +168,14 @@ class Store:
         destination = self.get_setting('destination')
         scope = destination['identity']['uuid'] + ':' + destination['root'] if destination else ''
         args = [scope,scope]
+        if recovery_only:
+            sql += ' AND o.id IS NOT NULL'
+            if self.get_setting('selection') is not None:
+                sql += ' AND f.id IN (SELECT file_id FROM job_selection)'
+        if parent is not None:
+            prefix = parent.rstrip('/')+'/'
+            sql += " AND substr(f.path,1,?)=? AND instr(substr(f.path,?),'/')=0"
+            args.extend([len(prefix),prefix,len(prefix)+1])
         if snapshot_id is not None:
             sql += ' AND f.id IN (SELECT file_id FROM members WHERE snapshot_id=?)'
             args.append(snapshot_id)
@@ -187,6 +195,49 @@ class Store:
                     if row[field]:
                         row[field] = os.path.join(destination['root'],row[field])
         return rows
+
+    def recovery_view(self, offset=0, limit=100, query='', state='', parent=None):
+        """Read only: summarize the current selection in the current destination."""
+        where = 'o.kind=\'original\''
+        args = []
+        if self.get_setting('selection') is not None:
+            where += ' AND f.id IN (SELECT file_id FROM job_selection)'
+        if query:
+            where += ' AND instr(lower(f.path),lower(?))>0'
+            args.append(query)
+        if state:
+            where += ' AND (o.status=? OR p.status=?)'
+            args.extend([state,state])
+        prefix = parent.rstrip('/')+'/' if parent is not None else '/'
+        if parent is not None:
+            where += ' AND substr(f.path,1,?)=?'
+            args.extend([len(prefix),prefix])
+        preview_status = 'p.status' if self.get_setting('previews',True) else 'NULL'
+        source = '''SELECT f.path,f.size,o.status,'''+preview_status+''' preview_status FROM files f
+                    JOIN jobs o ON o.file_id=f.id
+                    LEFT JOIN jobs p ON p.file_id=f.id AND p.kind='preview' WHERE '''+where
+        totals = '''count(*) total,coalesce(sum(size),0) bytes,
+                    coalesce(sum(status IN ('verified_md5','verified_size')),0) saved,
+                    coalesce(sum(CASE WHEN status IN ('verified_md5','verified_size') THEN size ELSE 0 END),0) saved_bytes,
+                    coalesce(sum(status='pending' OR preview_status='pending'),0) pending,
+                    coalesce(sum(status='active' OR preview_status='active'),0) active,
+                    coalesce(sum(preview_status='preview_saved'),0) previews_saved,
+                    coalesce(sum(status IN ('deferred','conflict') OR preview_status IN ('deferred','conflict')),0) errors'''
+        with self.connect() as db:
+            result = dict(db.execute('WITH selected AS ('+source+') SELECT '+totals+' FROM selected',args).fetchone())
+            result['folders'] = []
+            if parent is not None:
+                grouped = 'WITH selected AS ('+source+'''), children AS (
+                    SELECT *,substr(path,?) tail FROM selected)
+                    SELECT substr(tail,1,instr(tail,'/')-1) name,'''+totals+'''
+                    FROM children WHERE instr(tail,'/')>0 GROUP BY name ORDER BY name'''
+                for row in db.execute(grouped,args+[len(prefix)+1]):
+                    folder = dict(row)
+                    folder['path'] = prefix+folder.pop('name')
+                    result['folders'].append(folder)
+            result['file_total'] = result['total']-sum(f['total'] for f in result['folders'])
+        result['files'] = self.files(offset=offset,limit=limit,query=query,state=state,recovery_only=True,parent=parent)
+        return result
 
     def summary(self):
         with self.connect() as db:

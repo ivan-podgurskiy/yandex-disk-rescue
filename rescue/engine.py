@@ -1,5 +1,6 @@
 """Bounded persistent workers. No abandoned writer is retried concurrently."""
 import random
+import math
 import threading
 import time
 from collections import deque
@@ -11,6 +12,16 @@ from .models import TransferResult
 from .transfer import transfer
 
 DISK_ERRORS = {'missing_volume','wrong_volume','unsafe_path','no_space','disk_io','destination_busy'}
+TRANSFER_DEFAULTS={'workers':4,'timeout':12,'request_interval':0,'catalog_auto_retry':False}
+
+
+def transfer_settings(value):
+    if not isinstance(value,dict) or set(value)!=set(TRANSFER_DEFAULTS):raise ValueError('invalid_input')
+    for key,low,high in (('workers',1,8),('timeout',5,120),('request_interval',0,10)):
+        number=value[key]
+        if type(number) not in (int,float) or not math.isfinite(number) or not low<=number<=high:raise ValueError('invalid_input')
+    if type(value['workers']) is not int or type(value['catalog_auto_retry']) is not bool:raise ValueError('invalid_input')
+    return dict(value)
 
 
 class Engine:
@@ -39,7 +50,9 @@ class Engine:
         self._transferred = 0
         self._samples = deque()
         self.clock,self.jitter,self.transfer_fn = clock,jitter,transfer_fn
-        self.worker_count = max(1,min(int(workers),8))
+        self.transfer_settings=transfer_settings(self.store.get_setting('transfer_settings',{**TRANSFER_DEFAULTS,'workers':max(1,min(int(workers),8))}))
+        self.worker_count = self.transfer_settings['workers']
+        self._catalog_retry_at=0
         self.store.recover_interrupted()
         try:
             if client:
@@ -50,6 +63,18 @@ class Engine:
             self._owner.close()
             raise
 
+    def configure_transfer(self,value):
+        chosen=transfer_settings(value)
+        with self._lock:
+            self.store.set_setting('transfer_settings',chosen)
+            self.transfer_settings=chosen
+            self.worker_count=chosen['workers']
+            if self.client:
+                self.client.timeout=chosen['timeout']
+                self.client.request_interval=chosen['request_interval']
+            if self._threads:self._ensure_workers()
+            self._wake.set()
+
     def connect(self,client):
         with self._lock:
             if self._active or self._scanning or self._running or self._connecting:
@@ -57,12 +82,16 @@ class Engine:
             self._connecting = True
             self.connected = False
         try:
+            client.timeout=self.transfer_settings['timeout']
+            client.request_interval=self.transfer_settings['request_interval']
             account = client.check_access()
             if not account:
                 raise ApiError('invalid_response')
             with self._lock:
                 if self._stop.is_set():
                     raise ValueError('closed')
+                client.timeout=self.transfer_settings['timeout']
+                client.request_interval=self.transfer_settings['request_interval']
                 previous = self.store.get_setting('account')
                 if previous and previous != account:
                     raise ValueError('different_account')
@@ -109,16 +138,34 @@ class Engine:
 
     def _scan(self,sid):
         try:
+            failures=0
             offset = self.store.snapshot(sid)['cursor']
             progress = self.store.get_setting('scan_recheck')
             if not progress or progress['snapshot_id'] != sid:
                 progress = {'snapshot_id':sid,'start_count':self.store.snapshot_count(sid),'passes':0}
                 self.store.set_setting('scan_recheck',progress)
             while not self._catalog_cancel.is_set() and not self._stop.is_set():
+                if self._catalog_retry_at:
+                    if not self.transfer_settings['catalog_auto_retry']:break
+                    if self.clock()<self._catalog_retry_at:
+                        self._catalog_cancel.wait(min(1,self._catalog_retry_at-self.clock()))
+                        continue
+                    self._catalog_retry_at=0
                 if self.clock()<self._throttle_until:
                     self._catalog_cancel.wait(min(1,self._throttle_until-self.clock()))
                     continue
-                files = self.client.list_page(offset)
+                try:
+                    files = self.client.list_page(offset)
+                except ApiError as error:
+                    if not self.transfer_settings['catalog_auto_retry'] or error.code not in ('timeout','unavailable','throttled'):raise
+                    failures+=1
+                    with self._lock:
+                        self._scan_error=error.code
+                        self._catalog_retry_at=self.clock()+max(min(300,5*2**min(failures-1,6)),error.retry_after or 0)
+                        if error.code=='throttled':self._throttle_until=max(self._throttle_until,self._catalog_retry_at)
+                    continue
+                failures=0
+                self._scan_error=''
                 if not files:
                     observed = self.store.snapshot_count(sid)
                     if progress['passes'] >= 1 and observed == progress['start_count']:
@@ -147,6 +194,7 @@ class Engine:
         finally:
             with self._lock:
                 self._scanning = False
+                self._catalog_retry_at=0
 
     def start(self,previews=True,file_ids=None,snapshot_id=None):
         with self._lock:
@@ -177,11 +225,10 @@ class Engine:
             self._wake.set()
 
     def _ensure_workers(self):
-        if not self._threads:
-            for _ in range(self.worker_count):
-                worker=threading.Thread(target=self._worker,daemon=True)
-                self._threads.append(worker)
-                worker.start()
+        while len(self._threads)<self.worker_count:
+            worker=threading.Thread(target=self._worker,daemon=True)
+            self._threads.append(worker)
+            worker.start()
 
     def _pause(self,reason):
         self._running = False
@@ -232,7 +279,7 @@ class Engine:
             job = None
             with self._lock:
                 now = self.clock()
-                if self._running and self.connected and now>=self._throttle_until:
+                if self._running and self.connected and now>=self._throttle_until and len(self._active)<self.worker_count:
                     job=self.store.claim_job(now,self._previews,self._selection)
                     if job:
                         self._active[job.id]=job
@@ -290,7 +337,8 @@ class Engine:
                         snapshot=self.store.snapshot(),running=self._running,previews=self._previews,selection_count=len(self._selection) if self._selection is not None else None,pause_reason=self._pause_reason,
                         active_jobs=len(self._active),safe_to_disconnect=not self._running and not self._active,
                         transferred_bytes=self._transferred,speed_bps=sum(n for _,n in samples)/10,
-                        retry_in=max(0,self._throttle_until-now),free_bytes=free,
+                        retry_in=max(0,self._throttle_until-now),catalog_retry_in=max(0,self._catalog_retry_at-now),
+                        transfer_settings=dict(self.transfer_settings),free_bytes=free,
                         destination=self.destination.root if self.destination else None,
                         expected_destination=self.store.get_setting('destination'),volume_error=volume_error)
             return data

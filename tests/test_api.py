@@ -24,6 +24,15 @@ class Transport:
 
 
 class ApiTests(unittest.TestCase):
+    def test_api_interval_spaces_metadata_requests(self):
+        client,transport=self.client({'user':{'uid':'fixture'}})
+        client.request_interval=.03
+        client.check_access()
+        started=time.monotonic()
+        client.check_access()
+        self.assertGreaterEqual(time.monotonic()-started,.025)
+        self.assertEqual(len(transport.requests),2)
+
     def setUp(self):
         self.assertIsNotNone(YandexClient, 'safe client must exist')
 

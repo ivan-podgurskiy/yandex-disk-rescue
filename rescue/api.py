@@ -5,6 +5,7 @@ import json
 import re
 import socket
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,6 +57,9 @@ class YandexClient:
         self._token = token.strip()
         self.preview_size = 'XXXL'
         self.timeout = timeout
+        self.request_interval = 0
+        self._request_lock = threading.Lock()
+        self._last_request = 0
         self._opener = opener or urllib.request.build_opener(SafeRedirect())
 
     def open_stream(self, url, authenticated=False):
@@ -75,6 +79,13 @@ class YandexClient:
             raise ApiError('unavailable') from None
 
     def _json(self, path, params=None):
+        # Pace API metadata requests across catalog and transfer workers.
+        with self._request_lock:
+            while True:
+                delay=self.request_interval-(time.monotonic()-self._last_request)
+                if delay<=0:break
+                time.sleep(min(.1,delay))
+            self._last_request=time.monotonic()
         url = API + path
         if params:
             url += '?' + urllib.parse.urlencode(params)

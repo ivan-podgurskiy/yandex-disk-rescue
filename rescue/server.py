@@ -5,6 +5,9 @@ import io
 import json
 import os
 import secrets
+import hashlib
+import re
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +22,21 @@ SAFE_ERRORS={'auth','invalid_response','unavailable','timeout','throttled','miss
              'different_destination','pause_required','writers_active','auth_required','destination_required',
              'confirmation_required','scan_active','invalid_selection'}
 
+MEDIA_TYPES={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.gif':'image/gif',
+             '.webp':'image/webp','.bmp':'image/bmp','.mp4':'video/mp4','.m4v':'video/mp4',
+             '.webm':'video/webm','.mov':'video/quicktime','.ogv':'video/ogg'}
+
+
+def media_range(value,size):
+    if not value:return 0,size-1
+    match=re.fullmatch(r'bytes=(\d*)-(\d*)',value)
+    if not match or not any(match.groups()) or size==0:raise ValueError('invalid_range')
+    first,last=match.groups()
+    start=int(first) if first else max(0,size-int(last))
+    end=min(int(last),size-1) if first and last else size-1
+    if start>end or start>=size:raise ValueError('invalid_range')
+    return start,end
+
 
 def error_code(error):
     value=getattr(error,'code',str(error))
@@ -26,6 +44,52 @@ def error_code(error):
 
 
 class Application:
+    def open_media(self,file_id,kind):
+        if kind not in ('original','preview'):raise FileNotFoundError()
+        with self.engine._lock:
+            destination=self.engine.destination
+            if not destination:raise FileNotFoundError()
+            destination.check()
+            with self.engine.store.connect() as db:
+                row=db.execute('''SELECT f.path,j.status,m.rel FROM files f
+                    JOIN jobs j ON j.file_id=f.id AND j.kind=?
+                    JOIN mappings m ON m.file_id=f.id AND m.kind=j.kind AND m.scope=?
+                    WHERE f.id=?''',(kind,destination.scope,file_id)).fetchone()
+            allowed=('verified_md5','verified_size') if kind=='original' else ('preview_saved',)
+            if not row or row['status'] not in allowed:raise FileNotFoundError()
+            mime='image/jpeg' if kind=='preview' else MEDIA_TYPES.get(Path(row['path']).suffix.lower())
+            if not mime:raise FileNotFoundError()
+            src=destination.open_existing(row['rel'])
+            if kind=='preview':
+                try:
+                    header=src.read(16)
+                    src.seek(0)
+                    for signature,image_type in ((b'\x89PNG','image/png'),(b'GIF8','image/gif'),(b'BM','image/bmp'),
+                                                 (b'II*\x00','image/tiff'),(b'MM\x00*','image/tiff')):
+                        if header.startswith(signature):mime=image_type;break
+                    if header.startswith(b'RIFF') and header[8:12]==b'WEBP':mime='image/webp'
+                except BaseException:
+                    src.close()
+                    raise
+            return src,mime,row['path']
+
+    def media_signature(self,file_id,kind,expires):
+        destination=self.engine.destination
+        scope=destination.scope if destination else ''
+        return hmac.new(self.secret.encode(),f'{scope}|{file_id}|{kind}|{expires}'.encode(),hashlib.sha256).hexdigest()
+
+    def media_info(self,file_id):
+        with self.engine._lock:
+            for kind in ('original','preview'):
+                try:src,mime,path=self.open_media(file_id,kind)
+                except FileNotFoundError:continue
+                src.close()
+                expires=int(time.time())+3600
+                signature=self.media_signature(file_id,kind,expires)
+                return {'mime':mime,'kind':kind,'path':path,
+                        'url':f'/media?id={file_id}&kind={kind}&expires={expires}&signature={signature}'}
+        raise FileNotFoundError()
+
     def __init__(self,engine):
         self.engine=engine
         self.secret=secrets.token_urlsafe(32)
@@ -104,6 +168,10 @@ class Application:
                 else:
                     engine.store.forget_token()
             self.submit('connect',connect)
+        elif path=='/api/settings':
+            try:engine.configure_transfer(data)
+            except ValueError:raise TypeError('invalid_input') from None
+            return 200
         elif path=='/api/forget-token':
             engine.store.forget_token()
             return 200
@@ -188,7 +256,7 @@ def create_server(engine,data_dir,port=8765):
             self.send_header('X-Content-Type-Options','nosniff')
             self.send_header('X-Frame-Options','DENY')
             self.send_header('Referrer-Policy','no-referrer')
-            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -208,6 +276,44 @@ def create_server(engine,data_dir,port=8765):
                 return False
             return True
 
+        def serve_media(self,params):
+            file_id=int(params.get('id',['0'])[0])
+            kind=params.get('kind',[''])[0]
+            expires=int(params.get('expires',['0'])[0])
+            signature=params.get('signature',[''])[0]
+            with engine._lock:
+                if expires<int(time.time()) or not hmac.compare_digest(signature,app.media_signature(file_id,kind,expires)):
+                    self.reply(403,{'error':'forbidden'})
+                    return
+                src,mime,_=app.open_media(file_id,kind)
+            with src:
+                size=os.fstat(src.fileno()).st_size
+                try:start,end=media_range(self.headers.get('Range'),size)
+                except ValueError:
+                    self.send_response(416)
+                    self.send_header('Content-Range',f'bytes */{size}')
+                    self.send_header('Content-Length','0')
+                    self.end_headers()
+                    return
+                self.send_response(206 if self.headers.get('Range') else 200)
+                self.send_header('Content-Type',mime)
+                self.send_header('Content-Length',str(end-start+1))
+                self.send_header('Accept-Ranges','bytes')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('X-Content-Type-Options','nosniff')
+                self.send_header('Content-Security-Policy',"default-src 'none'; sandbox")
+                if self.headers.get('Range'):self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
+                self.end_headers()
+                src.seek(start)
+                remaining=end-start+1
+                try:
+                    while remaining:
+                        chunk=src.read(min(65536,remaining))
+                        if not chunk:break
+                        self.wfile.write(chunk)
+                        remaining-=len(chunk)
+                except (BrokenPipeError,ConnectionResetError):pass
+
         def do_GET(self):
             u=urlsplit(self.path)
             if not self.secure(u.path.startswith('/api/') and u.path!='/api/bootstrap'):
@@ -217,12 +323,25 @@ def create_server(engine,data_dir,port=8765):
                     self.reply(200,{'secret':app.secret})
                 elif u.path=='/api/status':
                     self.reply(200,app.status())
+                elif u.path=='/api/media':
+                    params=parse_qs(u.query)
+                    self.reply(200,app.media_info(int(params.get('id',['0'])[0])))
+                elif u.path=='/media':
+                    self.serve_media(parse_qs(u.query))
                 elif u.path=='/api/folders':
                     params=parse_qs(u.query)
                     value=params.get('snapshot_id',[None])[0]
                     snapshot=engine.store.snapshot(int(value) if value else None)
                     self.reply(200,{'snapshot_id':snapshot['id'] if snapshot else None,
                                     'folders':engine.store.folders(snapshot['id']) if snapshot else []})
+                elif u.path=='/api/recovery':
+                    params=parse_qs(u.query,keep_blank_values=True)
+                    offset=int(params.get('offset',['0'])[0])
+                    limit=min(200,int(params.get('limit',['100'])[0]))
+                    parent=params.get('parent',[None])[0]
+                    if offset<0 or limit<1 or (parent is not None and (not parent.startswith('/') or any(p in ('.','..') for p in parent.split('/')))):
+                        raise ValueError('invalid_input')
+                    self.reply(200,engine.store.recovery_view(offset,limit,params.get('query',[''])[0],params.get('state',[''])[0],parent))
                 elif u.path=='/api/files':
                     params=parse_qs(u.query)
                     offset=int(params.get('offset',['0'])[0])
@@ -242,7 +361,7 @@ def create_server(engine,data_dir,port=8765):
                     writer.writerow(fields)
                     offset=0
                     while True:
-                        rows=engine.store.files(offset=offset,limit=1000)
+                        rows=engine.store.files(offset=offset,limit=1000,recovery_only=parse_qs(u.query).get('recovery')==['1'])
                         if not rows:
                             break
                         for row in rows:
@@ -258,6 +377,8 @@ def create_server(engine,data_dir,port=8765):
                         self.reply(404,{'error':'not_found'})
                 else:
                     self.reply(404,{'error':'not_found'})
+            except (FileNotFoundError,DestinationError):
+                self.reply(404,{'error':'media_unavailable'})
             except (ValueError,TypeError):
                 self.reply(400,{'error':'invalid_input'})
             except Exception:

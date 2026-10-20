@@ -18,6 +18,71 @@ except ImportError:
 
 
 class ServerTests(unittest.TestCase):
+    def test_transfer_settings_endpoint_validates_and_persists(self):
+        chosen={'workers':2,'timeout':30,'request_interval':.5,'catalog_auto_retry':True}
+        code,_=self.request('POST','/api/settings',chosen)
+        self.assertEqual(code,200)
+        code,body=self.request('GET','/api/status')
+        self.assertEqual(json.loads(body)['transfer_settings'],chosen)
+        code,_=self.request('POST','/api/settings',{**chosen,'workers':0})
+        self.assertEqual(code,400)
+        self.assertEqual(self.store.get_setting('transfer_settings'),chosen)
+
+    def test_local_media_supports_ranges_and_requires_scoped_signature(self):
+        from rescue.destination import Destination
+        from rescue.models import TransferResult
+        from fakes import Volume
+        volume=Volume()
+        dest=Destination.bind(self.tmp.name,identify=volume.identify,capacity=volume.capacity)
+        self.addCleanup(dest.close)
+        self.engine.set_destination(dest)
+        sid=self.store.begin_snapshot()
+        self.store.record_page(sid,[CloudFile('/video.mp4',10)],1)
+        self.store.enqueue(sid,False)
+        job=self.store.claim_job(100)
+        rel=dest.map_path(job,self.store)
+        with open(os.path.join(self.tmp.name,rel),'wb') as out:out.write(b'0123456789')
+        self.store.complete_job(job.id,TransferResult('verified_size',verification='size'))
+        code,_=self.request('GET','/api/media?id=1',auth=False)
+        self.assertEqual(code,403)
+        code,body=self.request('GET','/api/media?id=1')
+        self.assertEqual(code,200)
+        info=json.loads(body)
+        self.assertEqual(info['mime'],'video/mp4')
+        code,body=self.request('GET',info['url'],headers={'Range':'bytes=2-4'},auth=False)
+        self.assertEqual((code,body),(206,b'234'))
+        code,_=self.request('GET',info['url'],headers={'Range':'bytes=20-'},auth=False)
+        self.assertEqual(code,416)
+        code,_=self.request('GET',info['url'].replace('id=1','id=2'),auth=False)
+        self.assertEqual(code,403)
+        code,_=self.request('GET',info['url'],headers={'Sec-Fetch-Site':'cross-site'},auth=False)
+        self.assertEqual(code,403)
+        newroot=os.path.join(self.tmp.name,'new')
+        os.mkdir(newroot)
+        other=Destination.bind(newroot,identify=volume.identify,capacity=volume.capacity)
+        self.addCleanup(other.close)
+        self.engine.set_destination(other,confirm_change=True)
+        code,_=self.request('GET',info['url'],auth=False)
+        self.assertEqual(code,403)
+
+    def test_recovery_endpoint_requires_auth_and_excludes_unselected_catalog_files(self):
+        sid=self.store.begin_snapshot()
+        self.store.record_page(sid,[CloudFile('/chosen/a',3),CloudFile('/other/b',5)],2)
+        self.store.enqueue(sid,False,[1])
+        code,_=self.request('GET','/api/recovery?parent=/',auth=False)
+        self.assertEqual(code,403)
+        code,body=self.request('GET','/api/recovery?parent=/')
+        self.assertEqual(code,200)
+        value=json.loads(body)
+        self.assertEqual(value['total'],1)
+        self.assertEqual([f['path'] for f in value['folders']],['/chosen'])
+        self.assertEqual(self.store.summary()['counts']['original'],{'pending':1})
+        code,body=self.request('GET','/api/export.csv?recovery=1')
+        self.assertEqual(code,200)
+        self.assertNotIn('/other/b',body.decode('utf-8-sig'))
+        code,_=self.request('GET','/api/recovery?parent=/../invalid')
+        self.assertEqual(code,400)
+
     def setUp(self):
         self.assertIsNotNone(create_server,'secure HTTP server must exist')
         self.tmp=tempfile.TemporaryDirectory()
